@@ -440,7 +440,7 @@ marauder/
 ├── ARCHITECTURE.md
 ├── README.md
 ├── LICENSE
-├── third_party/
+├── vendor/
 │   ├── sheenbidi/             # UAX #9
 │   ├── libunibreak/           # UAX #14
 │   ├── harfbuzz/              # shaping
