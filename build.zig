@@ -19,6 +19,10 @@ pub fn build(b: *std.Build) void {
     host.root_module.addIncludePath(b.path("vendor/glfw/include"));
     host.root_module.link_libc = true;
 
+    const glfw_module = b.createModule(.{ .root_source_file = b.path("vendor/glfw.zig"), .target = target, .optimize = optimize, .link_libc = true });
+
+    host.root_module.addImport("glfw", glfw_module);
+
     b.installArtifact(host);
 
     const renderer = b.addExecutable(.{
@@ -57,6 +61,7 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         "vendor/glfw/src/null_init.c",
         "vendor/glfw/src/null_monitor.c",
         "vendor/glfw/src/null_window.c",
+        "vendor/glfw/src/null_joystick.c",
     }, .flags = &.{} });
 
     switch (target.result.os.tag) {
@@ -82,12 +87,14 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
                 "vendor/glfw/src/cocoa_init.m",
                 "vendor/glfw/src/cocoa_monitor.m",
                 "vendor/glfw/src/cocoa_window.m",
+                "vendor/glfw/src/cocoa_joystick.m",
                 "vendor/glfw/src/cocoa_time.c",
                 "vendor/glfw/src/nsgl_context.m",
                 "vendor/glfw/src/posix_module.c",
                 "vendor/glfw/src/posix_thread.c",
             }, .flags = &.{} });
             lib.root_module.linkFramework("Cocoa", .{});
+            lib.root_module.linkFramework("IOKit", .{});
             lib.root_module.linkFramework("CoreFoundation", .{});
         },
         else => {
