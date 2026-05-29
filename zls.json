@@ -1,0 +1,6 @@
+{
+  "$schema": "https://raw.githubusercontent.com/zigtools/zls/master/schema.json",
+  "include_dirs": [
+    "vendor/glfw/include"
+  ]
+}
