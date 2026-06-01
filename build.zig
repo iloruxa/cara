@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -66,21 +66,28 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }, .flags = &.{} });
 
     switch (target.result.os.tag) {
-        .linux, .freebsd, .netbsd, .openbsd, .dragonfly, .hurd => {
-            lib.root_module.addCMacro("_GLFW_X11", "");
+        // Wayland support Flaky for these atm
+        // .freebsd, .netbsd, .openbsd, .dragonfly, .hurd
+        .linux => {
+            lib.root_module.addCMacro("_GLFW_WAYLAND", "");
+
+            const wayland_headers = generateWaylandProtocols(b);
+            lib.root_module.addIncludePath(wayland_headers);
+
             lib.root_module.addCSourceFiles(.{ .files = &.{
-                "vendor/glfw/src/x11_init.c",
-                "vendor/glfw/src/x11_monitor.c",
-                "vendor/glfw/src/x11_window.c",
+                "vendor/glfw/src/wl_init.c",
+                "vendor/glfw/src/wl_monitor.c",
+                "vendor/glfw/src/wl_window.c",
                 "vendor/glfw/src/xkb_unicode.c",
                 "vendor/glfw/src/posix_module.c",
                 "vendor/glfw/src/posix_time.c",
                 "vendor/glfw/src/posix_thread.c",
                 "vendor/glfw/src/posix_poll.c",
-                "vendor/glfw/src/glx_context.c",
             }, .flags = &.{} });
 
-            lib.root_module.linkSystemLibrary("X11", .{});
+            lib.root_module.linkSystemLibrary("wayland-client", .{});
+            lib.root_module.linkSystemLibrary("wayland-cursor", .{});
+            lib.root_module.linkSystemLibrary("xkbcommon", .{});
         },
         .macos => {
             lib.root_module.addCMacro("_GLFW_COCOA", "");
@@ -99,14 +106,39 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             lib.root_module.linkFramework("CoreFoundation", .{});
         },
         else => {
-            std.debug.print(
-                "Marauder supports Linux, FreeBSD, OpenBSD, NetBSD, DragonflyBSD, GNU Hurd, and macOS.\n" ++
+            std.log.err(
+                "Marauder supports Linux (Wayland), macOS (Cocoa).\n" ++
                     "Your target '{s}' is not currently supported.\n",
                 .{@tagName(target.result.os.tag)},
             );
-            @panic("Unsupported Host Operating System");
+            // @panic("Unsupported Host Operating System");
+            return error.UnsupportedPlatform;
         },
     }
 
     return lib;
+}
+
+fn generateWaylandProtocols(b: *std.Build) std.Build.LazyPath {
+    const headers = b.addWriteFiles();
+
+    const protocols = [_][]const u8{ "wayland", "xdg-shell", "xdg-decoration-unstable-v1", "xdg-activation-v1", "viewporter", "relative-pointer-unstable-v1", "pointer-constraints-unstable-v1", "fractional-scale-1" };
+
+    for (protocols) |proto| {
+        const xml_path = b.path(b.fmt("vendor/glfw/deps/wayland/{s}.xml", .{proto}));
+
+        const header_cmd = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
+        header_cmd.addFileArg(xml_path);
+
+        const header_out = header_cmd.addOutputFileArg(b.fmt("{s}-client-protocol.h", .{proto}));
+        _ = headers.addCopyFile(header_out, b.fmt("{s}-client-protocol.h", .{proto}));
+
+        const code_cmd = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
+        code_cmd.addFileArg(xml_path);
+
+        const code_out = code_cmd.addOutputFileArg(b.fmt("{s}-client-protocol.h", .{proto}));
+        _ = headers.addCopyFile(code_out, b.fmt("{s}-client-protocol.h", .{proto}));
+    }
+
+    return headers.getDirectory();
 }
