@@ -1,12 +1,12 @@
 # Architecture
 
-This document describes how Marauder is built. It is the reference for anyone implementing, reviewing, or contributing to the project.
+This document describes how Cara is built. It is the reference for anyone implementing, reviewing, or contributing to the project.
 
 ---
 
 ## 1. Overview
 
-Marauder runs as two operating-system processes communicating through a shared-memory channel and an IPC control channel. The split is the security boundary, the performance boundary, and the conceptual boundary of the system. Every decision below either lives inside one process or describes how the two communicate.
+Cara runs as two operating-system processes communicating through a shared-memory channel and an IPC control channel. The split is the security boundary, the performance boundary, and the conceptual boundary of the system. Every decision below either lives inside one process or describes how the two communicate.
 
 ### 1.1 The Stack
 
@@ -96,7 +96,7 @@ Glyph is the markup language pages are written in. A glyph is an inscribed mark 
 
 #### 2.2.1 Rationale
 
-HTML carries thirty years of error-correcting state machines, quirks modes, and parser-as-state-machine behavior. Marauder does not render HTML, so the parser does not need to inherit any of that. KDL is well-designed but its grammar fights the use cases the document language must serve — its utility-tag syntax isn't actually valid KDL, and its rich-text handling fragments paragraphs into trees. JSON, YAML, and TOML are configuration formats, not document formats; they have no story for mixed content. Markdown alone is excellent for prose but unable to express structured UI. Lua tables would dissolve the declarative/imperative boundary.
+HTML carries thirty years of error-correcting state machines, quirks modes, and parser-as-state-machine behavior. Cara does not render HTML, so the parser does not need to inherit any of that. KDL is well-designed but its grammar fights the use cases the document language must serve — its utility-tag syntax isn't actually valid KDL, and its rich-text handling fragments paragraphs into trees. JSON, YAML, and TOML are configuration formats, not document formats; they have no story for mixed content. Markdown alone is excellent for prose but unable to express structured UI. Lua tables would dissolve the declarative/imperative boundary.
 
 Glyph is a purpose-built grammar that takes the parts of each prior art that work and discards the rest.
 
@@ -390,7 +390,7 @@ A future capability for applications that need more than the standard component 
 page { app src="myapp.wasm" .w-full .h-full }
 ```
 
-The host instantiates the WASM module via a runtime such as Wasmtime, hands it a render surface scoped to the node's box, and routes input events into it. The module brings its own UI; Marauder provides a render target and capability-restricted I/O.
+The host instantiates the WASM module via a runtime such as Wasmtime, hands it a render surface scoped to the node's box, and routes input events into it. The module brings its own UI; Cara provides a render target and capability-restricted I/O.
 
 Not implemented in v1. The architecture is designed such that adding it later is purely additive — no v1 decision precludes it.
 
@@ -425,9 +425,9 @@ The following are not in scope for v1, and several will never be in scope:
 - Browser extensions. Per-page Lua replaces the use cases extensions typically serve.
 - Print, PDF generation, or `window.print` equivalents.
 - WebRTC, WebSockets, Service Workers, IndexedDB, ContentEditable. HTTP plus Server-Sent Events covers most use cases that motivate these.
-- Sync, accounts, cloud features. Marauder is a piece of software, not a service.
+- Sync, accounts, cloud features. Cara is a piece of software, not a service.
 - DRM, EME, Widevine. Pages requiring these can be served from a browser that implements them.
-- Telemetry. Marauder makes no network requests on its own behalf.
+- Telemetry. Cara makes no network requests on its own behalf.
 - A marketplace, theme store, or monetization layer.
 
 ---
@@ -435,7 +435,7 @@ The following are not in scope for v1, and several will never be in scope:
 ## 5. Planned Project Layout
 
 ```
-marauder/
+cara/
 ├── build.zig
 ├── ARCHITECTURE.md
 ├── README.md

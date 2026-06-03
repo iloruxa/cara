@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) !void {
     const glfw = try buildGlfw(b, target, optimize);
 
     const host = b.addExecutable(.{
-        .name = "marauder-host",
+        .name = "Cara",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/host/main.zig"),
             .target = target,
@@ -26,14 +26,14 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(host);
 
     const renderer = b.addExecutable(.{
-        .name = "marauder-renderer",
+        .name = "Cara-renderer",
         .root_module = b.createModule(.{ .root_source_file = b.path("src/renderer/main.zig"), .target = target, .optimize = optimize }),
     });
 
     b.installArtifact(renderer);
 
     // `zig build run` runs the host, which will eventually spawn the renderer.
-    const run_host = b.addSystemCommand(&.{"./zig-out/bin/marauder-host"});
+    const run_host = b.addSystemCommand(&.{"./zig-out/bin/Cara"});
     run_host.step.dependOn(b.getInstallStep());
     const run_step = b.step("run", "Run the host process");
     run_step.dependOn(&run_host.step);
@@ -107,7 +107,7 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
         else => {
             std.log.err(
-                "Marauder supports Linux (Wayland), macOS (Cocoa).\n" ++
+                "Cara supports Linux (Wayland), macOS (Cocoa).\n" ++
                     "Your target '{s}' is not currently supported.\n",
                 .{@tagName(target.result.os.tag)},
             );

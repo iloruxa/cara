@@ -1,5 +1,5 @@
 const std = @import("std");
 
 pub fn main() !void {
-    std.debug.print("marauder renderer started\n", .{});
+    std.debug.print("Cara renderer started\n", .{});
 }
