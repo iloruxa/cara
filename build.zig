@@ -26,10 +26,10 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(host);
 
     const renderer = b.addExecutable(.{
-        .name = "Cara-renderer",
+        .name = "cara-renderer",
         .root_module = b.createModule(.{ .root_source_file = b.path("src/renderer/main.zig"), .target = target, .optimize = optimize }),
     });
-
+    renderer.root_module.link_libc = true;
     b.installArtifact(renderer);
 
     // `zig build run` runs the host, which will eventually spawn the renderer.
