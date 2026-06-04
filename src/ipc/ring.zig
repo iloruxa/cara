@@ -22,6 +22,12 @@ pub const version: u32 = 1;
 /// Cache-line size on x86_64 and aarch64 -- The only targets Cara build for.
 pub const cache_line = 64;
 
+/// Pad identity
+const pad_identity = cache_line - 2 * @sizeOf(u32);
+
+/// Pad cursor
+const pad_cursor = cache_line - @sizeOf(u32);
+
 /// Fixed header at offset 0 of the region.
 /// Three regions, each on its own cache-line:
 ///
@@ -37,15 +43,15 @@ pub const Header = extern struct {
     /// --- identity line: write-once, read-only ---
     magic: u32,
     version: u32,
-    _pad_identity: [cache_line - 2 * @sizeOf(u32)]u8 = [_]u8{0} ** (cache_line - 2 * @sizeOf(u32)),
+    _pad_identity: [pad_identity]u8 = std.mem.zeroes([pad_identity]u8),
 
     /// --- producer line: renderer writes, host reads ---
     head: u32,
-    _pad_head: [cache_line - @sizeOf(u32)]u8 = [_]u8{0} ** (cache_line - @sizeOf(u32)),
+    _pad_head: [pad_cursor]u8 = std.mem.zeroes([pad_cursor]u8),
 
     /// --- consumer line: host writes, renderer reads ---
     tail: u32,
-    _pad_tail: [cache_line - @sizeOf(u32)]u8 = [_]u8{0} ** (cache_line - @sizeOf(u32)),
+    _pad_tail: [pad_cursor]u8 = std.mem.zeroes([pad_cursor]u8),
 };
 
 /// Byte offset where the payload area begins (immediately after the `Header`).
@@ -59,7 +65,7 @@ comptime {
     // If the pading math is ever wrong, this fails at compile time instead of
     // becoming silent cross-process corruption.
     std.debug.assert(@offsetOf(Header, "magic") == 0);
-    std.debug.assert(@offsetOf(Header, "head") == 0);
-    std.debug.assert(@offsetOf(Header, "tail") == 0);
+    std.debug.assert(@offsetOf(Header, "head") == cache_line);
+    std.debug.assert(@offsetOf(Header, "tail") == 2 * cache_line);
     std.debug.assert(@sizeOf(Header) == 3 * cache_line);
 }

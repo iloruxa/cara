@@ -1,8 +1,6 @@
 const std = @import("std");
 const glfw = @import("glfw");
-
-const shm_size = 4096;
-const magic: u32 = 0x43415241; // "CARA"
+const ring = @import("ring");
 
 pub fn main(init: std.process.Init) !void {
     if (glfw.glfwInit() == glfw.GLFW_FALSE) {
@@ -44,18 +42,21 @@ pub fn main(init: std.process.Init) !void {
     // Teardown on any exit from here - including error returns below.
     defer _ = std.c.shm_unlink(shm_name.ptr);
 
-    if (std.c.ftruncate(fd, shm_size) != 0) {
+    if (std.c.ftruncate(fd, ring.region_size) != 0) {
         const errno_val: c_int = std.c._errno().*;
         std.debug.print("HOST: ftruncate failed, ERRNO={d}\n", .{errno_val});
         return error.FtruncateFailed;
     }
 
-    const mapping = try std.posix.mmap(null, shm_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
+    const mapping = try std.posix.mmap(null, ring.region_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
     defer std.posix.munmap(mapping);
 
-    const slot: *u32 = @ptrCast(@alignCast(mapping.ptr));
-    slot.* = magic;
-    std.debug.print("HOST: created {s}, wrote 0x{X}, holding it\n", .{ shm_name, slot.* });
+    const header: *ring.Header = @ptrCast(@alignCast(mapping.ptr));
+    header.magic = ring.magic;
+    header.version = ring.version;
+    header.head = 0;
+    header.tail = 0;
+    std.debug.print("HOST: created {s}, header magic=0x{X} version={d}\n", .{ shm_name, header.magic, header.version });
 
     // Spawn renderer engine
     spawnRenderer(init.io, init.gpa, shm_name) catch |err| {
