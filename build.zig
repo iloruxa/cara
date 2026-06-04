@@ -32,6 +32,16 @@ pub fn build(b: *std.Build) !void {
     renderer.root_module.link_libc = true;
     b.installArtifact(renderer);
 
+    // Shared IPC wire-format, imported by both processes so the host and
+    // renderer agree on the region layout from one source of truth.
+    const ring_module = b.createModule(.{
+        .root_source_file = b.path("src/ipc/ring.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    host.root_module.addImport("ring", ring_module);
+    renderer.root_module.addImport("ring", ring_module);
+
     // `zig build run` runs the host, which will eventually spawn the renderer.
     const run_host = b.addSystemCommand(&.{"./zig-out/bin/Cara"});
     run_host.step.dependOn(b.getInstallStep());
