@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Window event loop
     while (glfw.glfwWindowShouldClose(window) == glfw.GLFW_FALSE) {
-        glfw.glfwPollEvents();
+        glfw.glfwWaitEvents();
     }
 }
 
