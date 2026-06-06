@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Cara host started\n", .{});
 
-    // ---- Shared memory region ----
+    // --- Shared memory region ---
     // Created here, owned by the host for the whole process lifetime,
     // torn down on exit. The rendere will map this same region by name.
 
