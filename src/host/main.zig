@@ -64,27 +64,25 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    // --- Consumer: waits for the rendere to publish, then read the payload. ---
-    // TEMPORARY SCAFFOLD: spin-wait on head with an Acquire load until the
-    // renderer publishes. The real wake-up is a `FrameReady` IPC message;
-    // This busy-wait exists only to prove the Release/Acquire ordering in
-    // isolation and will be DELETED when the control channel lands.
-    var published: u32 = 0;
+    // --- Consumer: drain whatever the producer has published past tail ---
+    var avail: u32 = 0;
     var spins: u32 = 0;
 
     while (spins < 100_000_000_000) : (spins += 1) {
-        published = @atomicLoad(u32, &header.head, .acquire);
-
-        if (published != 0) break;
+        const head = @atomicLoad(u32, &header.head, .acquire);
+        avail = head -% header.tail; // host owns tail, so a plain read is fine
+        if (avail != 0) break;
     }
 
-    if (published == 0) {
+    if (avail == 0) {
         std.debug.print("HOST: timed out waiting for renderer to publish\n", .{});
     } else {
         // Acquire above guarantees the renderer's payload writes are visible here.
+        const tail = header.tail;
+        const idx = tail % ring.payload_size;
         const payload: [*]const u8 = @as([*]const u8, @ptrCast(mapping.ptr)) + ring.payload_offset;
-        const bytes = payload[0..published];
-        std.debug.print("HOST: consumed head={d} payload=\"{s}\"\n", .{ published, bytes });
+        const bytes = payload[0..avail];
+        std.debug.print("HOST: consumed head={d} at idx={d}, tail {d} -> {d}, payload=\"{s}\"\n", .{ avail, idx, tail, tail +% avail, bytes });
     }
 
     // Window event loop
