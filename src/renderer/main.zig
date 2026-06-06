@@ -42,4 +42,17 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print("RENDERER: header OK - magic=0x{X} version={d} head={d} tail={d} via {s}\n", .{ header.magic, header.version, header.head, header.tail, shm_name });
+
+    // --- Producer: write a small fixed payload, then publish via head. ---
+    // The payload lives after the header. Write the bytes FIRST...
+    const payload: [*]u8 = @as([*]u8, @ptrCast(mapping.ptr)) + ring.payload_offset;
+    const message = "HELLO CARA";
+    @memcpy(payload[0..message.len], message);
+
+    // ... Then publish how many bytes are ready with a Release store.
+    // Release guarantees the @memcpy above is visible to any consumer that
+    // observes this new head via an Acquire load.
+    @atomicStore(u32, &header.head, @intCast(message.len), .release);
+
+    std.debug.print("RENDERER: wrote {d} bytes, published head={d}\n", .{ message.len, message.len });
 }

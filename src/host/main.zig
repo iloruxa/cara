@@ -64,6 +64,29 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
+    // --- Consumer: waits for the rendere to publish, then read the payload. ---
+    // TEMPORARY SCAFFOLD: spin-wait on head with an Acquire load until the
+    // renderer publishes. The real wake-up is a `FrameReady` IPC message;
+    // This busy-wait exists only to prove the Release/Acquire ordering in
+    // isolation and will be DELETED when the control channel lands.
+    var published: u32 = 0;
+    var spins: u32 = 0;
+
+    while (spins < 100_000_000_000) : (spins += 1) {
+        published = @atomicLoad(u32, &header.head, .acquire);
+
+        if (published != 0) break;
+    }
+
+    if (published == 0) {
+        std.debug.print("HOST: timed out waiting for renderer to publish\n", .{});
+    } else {
+        // Acquire above guarantees the renderer's payload writes are visible here.
+        const payload: [*]const u8 = @as([*]const u8, @ptrCast(mapping.ptr)) + ring.payload_offset;
+        const bytes = payload[0..published];
+        std.debug.print("HOST: consumed head={d} payload=\"{s}\"\n", .{ published, bytes });
+    }
+
     // Window event loop
     while (glfw.glfwWindowShouldClose(window) == glfw.GLFW_FALSE) {
         glfw.glfwWaitEvents();
