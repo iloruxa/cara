@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
 
     while (spins < 100_000_000_000) : (spins += 1) {
         const head = @atomicLoad(u32, &header.head, .acquire);
-        avail = head -% header.tail; // host owns tail, so a plain read is fine
+        avail = head -% header.tail;
         if (avail != 0) break;
     }
 
@@ -78,11 +78,16 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("HOST: timed out waiting for renderer to publish\n", .{});
     } else {
         // Acquire above guarantees the renderer's payload writes are visible here.
-        const tail = header.tail;
+        const tail = header.tail; // host owns tail, so a plain read is fine
         const idx = tail % ring.payload_size;
         const payload: [*]const u8 = @as([*]const u8, @ptrCast(mapping.ptr)) + ring.payload_offset;
-        const bytes = payload[0..avail];
+        const bytes = payload[idx .. idx + avail]; // single record, no wrap-around yet
         std.debug.print("HOST: consumed head={d} at idx={d}, tail {d} -> {d}, payload=\"{s}\"\n", .{ avail, idx, tail, tail +% avail, bytes });
+
+        // Publish consumption: Release-store the advanced tail so the producer's
+        // Acquire-load of tail sees the freed space. Symmetric to the renderer's
+        // Release-store of head.
+        @atomicStore(u32, &header.tail, tail +% avail, .release);
     }
 
     // Window event loop
