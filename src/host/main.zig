@@ -95,7 +95,7 @@ fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8) !vo
     const self_dir = try std.process.executableDirPathAlloc(io, gpa);
     defer gpa.free(self_dir);
 
-    const renderer_path = try std.fs.path.join(gpa, &.{ self_dir, "Cara-renderer" });
+    const renderer_path = try std.fs.path.join(gpa, &.{ self_dir, "cara-renderer" });
     defer gpa.free(renderer_path);
 
     const argv = [_][]const u8{ renderer_path, shm_name };
