@@ -43,26 +43,15 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("RENDERER: header OK - magic=0x{X} version={d} head={d} tail={d} via {s}\n", .{ header.magic, header.version, header.head, header.tail, shm_name });
 
-    // --- Producer: write one record into the ring, then advance head ---
-    const payload: [*]u8 = @as([*]u8, @ptrCast(mapping.ptr)) + ring.payload_offset;
-    const message = "HELLO CARA";
-    const size: u32 = @intCast(message.len);
+    // --- Producer: write one frame into the ring, then publish ---
+    const r = ring.Ring.init(mapping);
+    var w = r.writer();
 
-    // Producer owns `head`. Acquire-load the consumer's `tail` to see free space
-    const tail = @atomicLoad(u32, &header.tail, .acquire);
-    const head = header.head; // Only the producer writes head, so a plain reaed is fine
-    const used = head -% tail; // Wrapping subtraction
-    const free = ring.payload_size - used; // plain: used <= payload_size
+    w.append("HELLO CARA") catch |err| {
+        std.debug.print("RENDERER: append failed: {s}\n", .{@errorName(err)});
+    };
+    // Publish the whole frame with one Release-store
+    w.commit();
 
-    if (free < size) {
-        std.debug.print("RENDERER: not enough free space ({d} < {d})\n", .{ free, size });
-        return error.RingFull;
-    }
-
-    // Write at head's position, then publish the advanced head with a Release store
-    const idx = head % ring.payload_size;
-    @memcpy(payload[0..message.len], message);
-    @atomicStore(u32, &header.head, head +% size, .release);
-
-    std.debug.print("RENDERER: wrote {d} bytes at idx={d}, published head={d} -> {d}\n", .{ size, idx, head, head +% size });
+    std.debug.print("RENDERER: committed frame, head now {d}\n", .{header.head});
 }

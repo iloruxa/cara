@@ -64,30 +64,29 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    // --- Consumer: drain whatever the producer has published past tail ---
-    var avail: u32 = 0;
-    var spins: u32 = 0;
+    // --- Consumer: drain the frame the renderer published ---
+    const r = ring.Ring.init(mapping);
+
+    // TODO: Delete this busy-wait. Block on the IPC socket for
+    // FrameReady, wake the GLFW loop via glfwPostEmptyEvent().
+    // SCAFFOLD ONLY
+    var frame: ?ring.Ring.Reader = null;
+    var spins: u64 = 0;
 
     while (spins < 100_000_000_000) : (spins += 1) {
-        const head = @atomicLoad(u32, &header.head, .acquire);
-        avail = head -% header.tail;
-        if (avail != 0) break;
+        frame = r.reader();
+
+        if (frame != null) break;
     }
 
-    if (avail == 0) {
-        std.debug.print("HOST: timed out waiting for renderer to publish\n", .{});
-    } else {
-        // Acquire above guarantees the renderer's payload writes are visible here.
-        const tail = header.tail; // host owns tail, so a plain read is fine
-        const idx = tail % ring.payload_size;
-        const payload: [*]const u8 = @as([*]const u8, @ptrCast(mapping.ptr)) + ring.payload_offset;
-        const bytes = payload[idx .. idx + avail]; // single record, no wrap-around yet
-        std.debug.print("HOST: consumed head={d} at idx={d}, tail {d} -> {d}, payload=\"{s}\"\n", .{ avail, idx, tail, tail +% avail, bytes });
+    if (frame) |*rd| {
+        while (rd.next()) |rec| {
+            std.debug.print("HOST: consumed {d} bytes: \"{s}\"\n", .{ rec.len, rec });
+        }
 
-        // Publish consumption: Release-store the advanced tail so the producer's
-        // Acquire-load of tail sees the freed space. Symmetric to the renderer's
-        // Release-store of head.
-        @atomicStore(u32, &header.tail, tail +% avail, .release);
+        rd.commit(); // release the whole frame with one Release-store
+    } else {
+        std.debug.print("HOST: timed out waiting for renderer to publish\n", .{});
     }
 
     // Window event loop
