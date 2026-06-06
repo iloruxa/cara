@@ -69,3 +69,36 @@ comptime {
     std.debug.assert(@offsetOf(Header, "tail") == 2 * cache_line);
     std.debug.assert(@sizeOf(Header) == 3 * cache_line);
 }
+
+/// On-wire prefix before every record's payload. 8 bytes so the payload that
+/// follows is 8-aligned - the host @ptrCast draw commands in place later and
+/// a misaligned @alignCast panics in safe builds
+pub const RecordHeader = extern struct {
+    len: u32, // payload byte count, or `skip_marker`
+    _reserved: u32 = 0, // becomes the DrawCommand tag later
+};
+
+pub const record_header_size = @sizeOf(RecordHeader); // == 8
+
+/// A `len` no real record can carry (max real len < payload_size): "no payload"
+/// here - skip to the buffer base and read the real record there
+pub const skip_marker: u32 = 0xFFFF_FFFF;
+
+pub const PushError = error{ RingFull, RecordTooLarge };
+
+comptime {
+    std.debug.assert(record_header_size == 8);
+    std.debug.assert(payload_size % 8 == 0); // every record stays 8-aligned
+    std.debug.assert(payload_offset % cache_line == 0); // payload base is cache-aligned
+}
+
+/// Round `n` up to the next multiple of 8. Bit-trick over std.mem.alignForward
+/// deliberately: no churny stdlib dependency for a comptime-known power of two.
+fn padTo8(n: u32) u32 {
+    return (n + 7) & ~@as(u32, 7);
+}
+
+/// Cursor bytes one record of `payload_len` consumes: header + padded payload
+fn frameSize(payload_len: u32) u32 {
+    return record_header_size + padTo8(payload_len);
+}
