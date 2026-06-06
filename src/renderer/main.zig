@@ -49,7 +49,9 @@ pub fn main(init: std.process.Init) !void {
 
     w.append("HELLO CARA") catch |err| {
         std.debug.print("RENDERER: append failed: {s}\n", .{@errorName(err)});
+        return err;
     };
+
     // Publish the whole frame with one Release-store
     w.commit();
 
