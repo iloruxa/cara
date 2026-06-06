@@ -1,0 +1,153 @@
+# ============================================================
+#  Cara — High-Level Architecture
+#
+#  A from-scratch browser. Two OS processes, one shared-memory
+#  data path, and one IPC control channel. The renderer is
+#  sandboxed and unprivileged; the host owns all OS resources.
+#
+#  Render:   d2 architecture.d2 architecture.svg
+#  Live:     d2 --watch architecture.d2
+# ============================================================
+
+direction: down
+
+# ---- Shared visual vocabulary --------------------------------
+classes: {
+  rcomp: {
+    style: { fill: "#eef2ff"; stroke: "#4f46e5"; stroke-width: 2; border-radius: 6 }
+  }
+  hcomp: {
+    style: { fill: "#ecfdf5"; stroke: "#059669"; stroke-width: 2; border-radius: 6 }
+  }
+  vendor: {
+    style: { fill: "#f5f5f4"; stroke: "#78716c"; stroke-width: 1; stroke-dash: 3; border-radius: 6 }
+  }
+  chan: {
+    style: { fill: "#ffedd5"; stroke: "#ea580c"; stroke-width: 2; border-radius: 6 }
+  }
+}
+
+# ============================================================
+#  RENDERER PROCESS  (one per origin · sandboxed · unprivileged)
+#  No syscalls, no filesystem, no network. Everything it needs
+#  from the outside world crosses the IPC boundary below.
+# ============================================================
+renderer: "RENDERER PROCESS — per origin · sandboxed · unprivileged" {
+  style: { fill: "#fafbff"; stroke: "#4f46e5"; stroke-width: 3; border-radius: 12; font-size: 18 }
+
+  bundle: "Page Bundle — *.glyph + *.lua" { shape: page; class: rcomp }
+  parser: "Glyph Parser — zero-alloc recursive descent" { class: rcomp }
+  lua: "Lua Runtime — LuaJIT, JIT enabled" { class: rcomp }
+  react: "Reactivity — signals · compute · bind · DirtyFlags" { class: rcomp }
+  scene: "Scene Graph — ECS · SoA pools · first-child / next-sibling" { class: rcomp }
+
+  systems: "Systems" {
+    style: { fill: "#eef2ff"; stroke: "#4f46e5"; border-radius: 6 }
+    sty: "Style" { class: rcomp }
+    lay: "Strict-Box Layout — constraints down, sizes up" { class: rcomp }
+    pnt: "Paint" { class: rcomp }
+    acc: "A11y projection (AccessKit-shaped)" { class: rcomp }
+  }
+
+  text: "Text Trinity" {
+    style: { fill: "#eef2ff"; stroke: "#4f46e5"; border-radius: 6 }
+    bidi: "SheenBidi — bidi (UAX 9)" { class: vendor }
+    brk: "libunibreak — line breaking (UAX 14)" { class: vendor }
+    shp: "HarfBuzz — shaping" { class: vendor }
+    ras: "FreeType — rasterization" { class: vendor }
+  }
+
+  dlw: "Display List Writer" { class: rcomp }
+
+  # internal pipeline
+  bundle -> parser
+  parser -> scene
+  lua -> react
+  react -> scene
+  scene -> systems
+  systems -> text
+  systems -> dlw
+}
+
+# ============================================================
+#  THE BOUNDARY  (security + performance + conceptual split)
+#  Everything large flows through shared memory; everything
+#  controlling flows through IPC. There is no third channel.
+# ============================================================
+channels: "PROCESS BOUNDARY" {
+  style: { fill: "#fff7ed"; stroke: "#ea580c"; stroke-width: 3; border-radius: 12; font-size: 18 }
+
+  ring: "Shared Memory — display-list ring · Release/Acquire on head" {
+    shape: queue
+    class: chan
+  }
+  ipc: "IPC Control Channel — small typed messages (Unix socket)" {
+    class: chan
+  }
+}
+
+# ============================================================
+#  HOST PROCESS  (privileged · owns window, GPU, net, storage)
+# ============================================================
+host: "HOST PROCESS — privileged · owns OS resources" {
+  style: { fill: "#f7fefb"; stroke: "#059669"; stroke-width: 3; border-radius: 12; font-size: 18 }
+
+  win: "Window + OS Event Pump" { class: hcomp }
+  spawn: "Process Spawner" { class: hcomp }
+  exec: "Display List Executor" { class: hcomp }
+  gpu: "GPU — render backend · color framebuffer · ID buffer" { class: hcomp }
+  hit: "Hit-Test — reads one ID-buffer pixel" { class: hcomp }
+  net: "Net — libcurl · HTTP/2 · TLS 1.3" { class: hcomp }
+  store: "Storage — per-origin SQLite KV" { shape: cylinder; class: hcomp }
+  clip: "Clipboard" { class: hcomp }
+  a11ybridge: "AccessKit Platform Bridge" { class: hcomp }
+
+  # internal flow
+  exec -> gpu
+  win -> hit
+  hit -> gpu
+  gpu -> a11ybridge
+}
+
+# ============================================================
+#  CROSS-BOUNDARY FLOWS
+# ============================================================
+
+# --- Bulk data path: renderer produces, host consumes (the ring) ---
+renderer.dlw -> channels.ring: display list — Release store on head
+channels.ring -> host.exec: Acquire load on head
+
+# --- Lifecycle: host spawns and feeds the renderer ---
+host.spawn -> renderer: SpawnRenderer + LoadPage (bundle over IPC)
+
+# --- Frame handshake ---
+renderer -> channels.ipc: FrameReady (offset, length)
+channels.ipc -> renderer: FrameDone · Resize
+
+# --- Network: renderer asks, host fetches ---
+renderer.lua -> channels.ipc: Fetch
+channels.ipc -> host.net: Fetch
+host.net -> channels.ipc: FetchResult
+channels.ipc -> renderer.lua: FetchResult · StorageResult
+
+# --- Storage over IPC ---
+renderer.lua -> channels.ipc: StorageOp
+channels.ipc -> host.store: StorageOp
+
+# --- Input: host hit-tests, sends resolved entity to renderer ---
+host.hit -> channels.ipc: InputEvent (hit entity resolved)
+channels.ipc -> renderer.scene: InputEvent
+
+# --- Accessibility projection ---
+renderer.systems -> channels.ipc: A11yUpdate
+channels.ipc -> host.a11ybridge: A11yUpdate
+
+# ============================================================
+#  LEGEND — the 12 IPC control-message types
+# ============================================================
+legend: |md
+  ### IPC control messages (v1)
+  `LoadPage` · `Fetch` · `FetchResult` · `StorageOp` · `StorageResult` · `InputEvent`
+  `FrameReady` · `FrameDone` · `A11yUpdate` · `Resize` · `SpawnRenderer` · `ProcessHealthcheck`
+|
+legend.near: bottom-center

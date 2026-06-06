@@ -8,7 +8,7 @@ Pages on Cara are written in **Glyph** — a small declarative markup language w
 
 This repository contains the entire project — the rendering engine, the browser built on it, and the IPC layer between them. One language for the engine, one for behavior, one for documents. Small enough that one person can read all of it.
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for how it actually works.
+See [`ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for how it actually works.
 
 ---
 
