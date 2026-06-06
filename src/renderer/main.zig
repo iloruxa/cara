@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
     // Write at head's position, then publish the advanced head with a Release store
     const idx = head % ring.payload_size;
     @memcpy(payload[0..message.len], message);
-    @atomicStore(u32, &header.head, @intCast(message.len), .release);
+    @atomicStore(u32, &header.head, head +% size, .release);
 
     std.debug.print("RENDERER: wrote {d} bytes at idx={d}, published head={d} -> {d}\n", .{ size, idx, head, head +% size });
 }
