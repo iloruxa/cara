@@ -1,6 +1,5 @@
 const std = @import("std");
-
-const shm_size = 4096;
+const ring = @import("ring");
 
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Cara renderer started\n", .{});
@@ -26,11 +25,21 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Map it - same size and flags the host used.
-    const mapping = try std.posix.mmap(null, shm_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
+    const mapping = try std.posix.mmap(null, ring.region_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
     defer std.posix.munmap(mapping);
 
-    // Read the magic number - from a process that never wrote it.
-    const slot: *u32 = @ptrCast(@alignCast(mapping.ptr));
-    const seen = slot.*;
-    std.debug.print("RENDERER: sees 0x{X} via {s}\n", .{ seen, shm_name });
+    // Overlay the shared header and validate it before trusting anything.
+    const header: *ring.Header = @ptrCast(@alignCast(mapping.ptr));
+
+    if (header.magic != ring.magic) {
+        std.debug.print("RENDERER: bad magic 0x{X} (expected 0x{X})\n", .{ header.magic, ring.magic });
+        return error.BadMagic;
+    }
+
+    if (header.version != ring.version) {
+        std.debug.print("RENDERER: version mismatch {d} (expected {d})\n", .{ header.version, ring.version });
+        return error.VersionMismatch;
+    }
+
+    std.debug.print("RENDERER: header OK - magic=0x{X} version={d} head={d} tail={d} via {s}\n", .{ header.magic, header.version, header.head, header.tail, shm_name });
 }
