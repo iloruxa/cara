@@ -102,3 +102,136 @@ fn padTo8(n: u32) u32 {
 fn frameSize(payload_len: u32) u32 {
     return record_header_size + padTo8(payload_len);
 }
+
+// --- The Ring ---
+//
+// Single-producer (renderer, owns `head`) / single-consumer (host, owns `tail`)
+// Synchronization granularity is the FRAME, not the record: a Writer appends
+// many records and publishes once; a Reader snapshots once and drains many.
+// One Release/Acquire pair per frame - matching the one FrameReady per frame.
+
+pub const Ring = struct {
+    header: *Header,
+    payload: []u8, // exactly payload_size bytes - bounds-checked in safe builds
+
+    /// Overlay a Ring onto a mapped region.
+    /// The `align(cache_line)` requirement is the type-system proof
+    /// that head@64 / tail@128 land on real cache-line boundaries - the false-sharing
+    /// guarantee, enforced, not assumed.
+    pub fn init(region: []align(cache_line) u8) Ring {
+        std.debug.assert(region.len >= region_size);
+
+        return .{
+            .header = @ptrCast(region.ptr),
+            .payload = region[payload_offset..][0..payload_size],
+        };
+    }
+
+    pub fn writer(self: Ring) Writer {
+        return .{
+            .ring = self,
+            .head = self.header.head, // producer owns head: plain load
+            .tail = @atomicLoad(u32, &self.header.tail, .acquire),
+        };
+    }
+
+    pub fn reader(self: Ring) ?Reader {
+        const head = @atomicLoad(u32, &self.header.head, .acquire); // ONE Acquire/drain
+        const tail = self.header.tail; // consumer owns tail: plain load
+
+        if (head -% tail == 0) return null; // empty (unambiguous: monotonic cursors)
+
+        return .{
+            .ring = self,
+            .head = head,
+            .tail = tail,
+        };
+    }
+
+    fn putHeader(self: Ring, idx: u32, h: RecordHeader) void {
+        const p: *RecordHeader = @ptrCast(@alignCast(self.payload[idx..].ptr));
+        p.* = h;
+    }
+
+    fn getHeader(self: Ring, idx: u32) RecordHeader {
+        const p: *const RecordHeader = @ptrCast(@alignCast(self.payload[idx..].ptr));
+        return p.*;
+    }
+
+    /// Producer view of one frame. Appends write payload bytes immediately but
+    /// DO NOT Publish; `commit` publishes `head` exactly once
+    pub const Writer = struct {
+        ring: Ring,
+        head: u32, // local working cursor - unpublished
+        tail: u32, // last-known consumer tail (acquire snapshot)
+
+        pub fn append(self: *Writer, record: []const u8) PushError!void {
+            if (record.len > payload_size) return error.RecordTooLarge;
+
+            const len: u32 = @intCast(record.len);
+            const need = frameSize(len);
+
+            if (need > payload_size) return error.RecordTooLarge;
+
+            var idx = self.head % payload_size;
+            const contiguous = payload_size - idx;
+            const skip_pad: u32 = if (contiguous < need) contiguous else 0;
+            const want = skip_pad + need;
+
+            if (payload_size - (self.head -% self.tail) < want) {
+                // Refresh the consumer's progress before declaring the ring full
+                self.tail = @atomicLoad(u32, &self.ring.header.tail, .acquire);
+
+                if (payload_size - (self.head -% self.tail) < want) return error.RingFull;
+            }
+
+            if (skip_pad != 0) {
+                self.ring.putHeader(idx, .{ .len = skip_marker });
+                idx = 0; // real record restarts at the buffer base
+            }
+
+            self.ring.putHeader(idx, .{ .len = len });
+
+            @memcpy(self.ring.payload[idx + record_header_size ..][0..len], record);
+
+            self.head +%= want; // local only - not visible until commit
+        }
+
+        /// The one publish point: Release-store makes every appended byte visible
+        pub fn commit(self: *Writer) void {
+            @atomicStore(u32, &self.ring.header.head, self.head, .release);
+        }
+    };
+
+    /// Consumer view of one frame: a consistent snapshot taken at `reader()`
+    /// Drains records with no further atomics; `commit` publishes `tail` once
+    pub const Reader = struct {
+        ring: Ring,
+        head: u32, // acquire snapshot - all bytes below this are visible
+        tail: u32, // local working cursor
+
+        /// Next record as an in-place view (no copy), or null when the frame's drained
+        pub fn next(self: *Reader) ?[]const u8 {
+            if (self.head -% self.tail == 0) return null;
+
+            var idx = self.tail % payload_size;
+            var step: u32 = 0;
+
+            if (self.ring.getHeader(idx).len == skip_marker) {
+                step += payload_size - idx; // skip the pad...
+                idx = 0; // ... and read the real record at the base
+            }
+
+            const len = self.ring.getHeader(idx).len;
+            step += frameSize(len);
+            self.tail +%= step;
+
+            return self.ring.payload[idx + record_header_size ..][0..len];
+        }
+
+        /// Release the whole drained frame at once. Symmetric to Writer.commit
+        pub fn commit(self: *Reader) void {
+            @atomicStore(u32, &self.ring.header.tail, self.tail, .release);
+        }
+    };
+};
