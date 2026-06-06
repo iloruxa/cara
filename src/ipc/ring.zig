@@ -235,3 +235,101 @@ pub const Ring = struct {
         }
     };
 };
+
+// --- Tests ---
+const testing = std.testing;
+
+fn freshRing(backing: []align(cache_line) u8) Ring {
+    const h: *Header = @ptrCast(backing.ptr);
+    h.* = .{ .magic = magic, .version = version, .head = 0, .tail = 0 };
+    return Ring.init(backing);
+}
+
+test "one record round-trips byte-for-byte" {
+    var backing: [region_size]u8 align(cache_line) = undefined;
+    const r = freshRing(&backing);
+
+    var w = r.writer();
+    try w.append("HELLO CARA");
+    w.commit();
+
+    var rd = r.reader() orelse return error.Empty;
+    try testing.expectEqualSlices(u8, "HELLO CARA", rd.next().?);
+    try testing.expect(rd.next() == null);
+    rd.commit();
+    try testing.expect(r.reader() == null); // fully drained
+}
+
+test "a frame of many records: one publish, one drain" {
+    var backing: [region_size]u8 align(cache_line) = undefined;
+    const r = freshRing(&backing);
+
+    var w = r.writer();
+    var i: u8 = 0;
+    while (i < 32) : (i += 1) {
+        try w.append(&[_]u8{ i, i +% 1, i +% 2, i +% 3 });
+    }
+    w.commit(); // single Release-store for all 32 records
+
+    var rd = r.reader() orelse return error.Empty; // single Acquire-load
+    var seen: u8 = 0;
+    while (rd.next()) |rec| : (seen += 1) {
+        try testing.expectEqualSlices(u8, &[_]u8{ seen, seen +% 1, seen +% 2, seen +% 3 }, rec);
+    }
+    rd.commit();
+    try testing.expectEqual(@as(u8, 32), seen);
+}
+
+test "varying-length stream stays intact across many wraparounds" {
+    var backing: [region_size]u8 align(cache_line) = undefined;
+    const r = freshRing(&backing);
+
+    var seed: u32 = 0x9E3779B9;
+    var n: u32 = 0;
+    while (n < 5000) : (n += 1) { // wraps the 3904B payload many times -> exercises skip_marker
+        var buf: [200]u8 = undefined;
+        const len = (seed % 200) + 1;
+        for (0..len) |k| buf[k] = @truncate(seed +% @as(u32, @intCast(k)));
+
+        var w = r.writer();
+        try w.append(buf[0..len]);
+        w.commit();
+
+        var rd = r.reader() orelse return error.Empty;
+        try testing.expectEqualSlices(u8, buf[0..len], rd.next().?);
+        rd.commit();
+
+        seed = seed *% 1664525 +% 1013904223; // LCG: deterministic, reproducible
+    }
+}
+
+test "writer reports RingFull without clobbering unread bytes" {
+    var backing: [region_size]u8 align(cache_line) = undefined;
+    const r = freshRing(&backing);
+
+    const rec = "0123456789ABCDEF"; // 16B payload -> 24B frame
+    var w = r.writer();
+    var pushed: u32 = 0;
+    while (true) {
+        w.append(rec) catch break;
+        pushed += 1;
+    }
+    w.commit();
+    try testing.expect(pushed > 0);
+
+    var rd = r.reader() orelse return error.Empty;
+    var drained: u32 = 0;
+    while (rd.next()) |got| : (drained += 1) {
+        try testing.expectEqualSlices(u8, rec, got);
+    }
+    rd.commit();
+    try testing.expectEqual(pushed, drained); // nothing overwritten under backpressure
+}
+
+test "oversized record is rejected, not truncated" {
+    var backing: [region_size]u8 align(cache_line) = undefined;
+    const r = freshRing(&backing);
+    var huge: [payload_size]u8 = undefined;
+    var w = r.writer();
+    try testing.expectError(error.RecordTooLarge, w.append(&huge));
+}

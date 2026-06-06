@@ -42,6 +42,11 @@ pub fn build(b: *std.Build) !void {
     host.root_module.addImport("ring", ring_module);
     renderer.root_module.addImport("ring", ring_module);
 
+    const ring_tests = b.addTest(.{ .root_module = ring_module });
+    const run_ring_tests = b.addRunArtifact(ring_tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_ring_tests.step);
+
     // `zig build run` runs the host, which will eventually spawn the renderer.
     const run_host = b.addSystemCommand(&.{"./zig-out/bin/Cara"});
     run_host.step.dependOn(b.getInstallStep());
