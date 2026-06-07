@@ -66,6 +66,8 @@ pub fn build(b: *std.Build) !void {
 
     // IPC: Control-channel protocol
     const protocol_module = b.createModule(.{ .root_source_file = b.path("src/ipc/protocol.zig"), .target = target, .optimize = optimize });
+    host.root_module.addImport("protocol", protocol_module);
+    renderer.root_module.addImport("protocol", protocol_module);
 
     // IPC: Control-channel protocol tests
     const protocol_tests = b.addTest(.{ .root_module = protocol_module });

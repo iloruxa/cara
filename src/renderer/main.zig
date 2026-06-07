@@ -1,6 +1,9 @@
 const draw = @import("draw");
+const protocol = @import("protocol");
 const ring = @import("ring");
 const std = @import("std");
+
+// Dependent imports
 const net = std.Io.net;
 
 pub fn main(init: std.process.Init) !void {
@@ -71,4 +74,21 @@ pub fn main(init: std.process.Init) !void {
     w.commit();
 
     std.debug.print("RENDERER: committed frame ({d}-byte DrawRect), head now {d}\n", .{ @sizeOf(draw.DrawRect), header.head });
+
+    // Signal the host that a frame is ready
+    const frame_ready = protocol.MsgHeader{ .kind = @intFromEnum(protocol.MsgKind.frame_ready), .len = 0 };
+
+    var ctl_buf: [64]u8 = undefined;
+    var cw = control.writer(init.io, &ctl_buf);
+
+    cw.interface.writeAll(std.mem.asBytes(&frame_ready)) catch |err| {
+        std.debug.print("RENDERER: FrameReady write failed: {s}\n", .{@errorName(err)});
+    };
+
+    cw.interface.flush() catch |err| {
+        std.debug.print("RENDERER: FrameReady flush failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    std.debug.print("RENDERER: sent FrameReady\n", .{});
 }

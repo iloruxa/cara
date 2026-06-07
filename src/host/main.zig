@@ -1,7 +1,10 @@
 const draw = @import("draw");
 const glfw = @import("glfw");
+const protocol = @import("protocol");
 const ring = @import("ring");
 const std = @import("std");
+
+// Dependent imports
 const net = std.Io.net;
 
 pub fn main(init: std.process.Init) !void {
@@ -89,43 +92,53 @@ pub fn main(init: std.process.Init) !void {
     // --- Consumer: drain the frame the renderer published ---
     const r = ring.Ring.init(mapping);
 
-    // TODO: Delete this busy-wait. Block on the IPC socket for
-    // FrameReady, wake the GLFW loop via glfwPostEmptyEvent().
-    // SCAFFOLD ONLY
-    var frame: ?ring.Ring.Reader = null;
-    var spins: u64 = 0;
+    // --- Wait for the renderer to signal a frame, then drain it ---
+    // Blocks on the control socket.
+    var msg: protocol.MsgHeader = undefined;
+    const msg_bytes = std.mem.asBytes(&msg);
+    var got: usize = 0;
 
-    while (spins < 100_000_000_000) : (spins += 1) {
-        frame = r.reader();
+    while (got < msg_bytes.len) {
+        var bufs: [1][]u8 = .{msg_bytes[got..]};
+        const n = control.read(init.io, &bufs) catch |err| {
+            std.debug.print("HOST: control read failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
 
-        if (frame != null) break;
-    }
-
-    // Drain loop
-    if (frame) |*rd| {
-        while (rd.next()) |rec| {
-            switch (@as(draw.DrawTag, @enumFromInt(rec.tag))) {
-                .rect => {
-                    // Host validates the (sandboxed, untrusted) renderer's payload
-                    // before trusting its shape.
-                    if (rec.bytes.len != @sizeOf(draw.DrawRect)) {
-                        std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{rec.bytes.len});
-                        continue;
-                    }
-
-                    // Decode in-place: no copy. Payload is 8-aligned by construction.
-                    const cmd: *const draw.DrawRect = @ptrCast(@alignCast(rec.bytes.ptr));
-
-                    std.debug.print("HOST: DrawRect x={d} y={d} w={d} h={d} rgba=0x{X}", .{ cmd.x, cmd.y, cmd.w, cmd.h, cmd.rbga });
-                },
-
-                else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ rec.tag, rec.bytes.len }),
-            }
+        if (n == 0) {
+            std.debug.print("HOST: renderer closed the control channel before FrameReady\n", .{});
+            return error.ControlClosed;
         }
 
-        rd.commit(); // release the whole frame with one Release-store
-    } else {
-        std.debug.print("HOST: timed out waiting for renderer to publish\n", .{});
+        got += n;
+    }
+
+    switch (@as(protocol.MsgKind, @enumFromInt(msg.kind))) {
+        .frame_ready => {
+            std.debug.print("HOST: FrameReady received - draining the ring\n", .{});
+
+            if (r.reader()) |frame| {
+                var rd = frame;
+                while (rd.next()) |rec| {
+                    switch (@as(draw.DrawTag, @enumFromInt(rec.tag))) {
+                        .rect => {
+                            if (rec.bytes.len != @sizeOf(draw.DrawRect)) {
+                                std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{rec.bytes.len});
+                                continue;
+                            }
+
+                            const cmd: *const draw.DrawRect = @ptrCast(@alignCast(rec.bytes.ptr));
+                            std.debug.print("HOST: DrawRect x={d} y={d} w={d} h={d} rgba=0x{X}\n", .{ cmd.x, cmd.y, cmd.w, cmd.h, cmd.rbga });
+                        },
+                        else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ rec.tag, rec.bytes.len }),
+                    }
+                }
+                rd.commit();
+            } else {
+                std.debug.print("HOST: FrameReady but the ring was empty\n", .{});
+            }
+        },
+        else => std.debug.print("HOST: unexpected control message kind={d}\n", .{msg.kind}),
     }
 
     // Window event loop
