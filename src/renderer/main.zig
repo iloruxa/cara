@@ -1,6 +1,7 @@
 const draw = @import("draw");
 const ring = @import("ring");
 const std = @import("std");
+const net = std.Io.net;
 
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Cara renderer started\n", .{});
@@ -13,6 +14,11 @@ pub fn main(init: std.process.Init) !void {
     const shm_name = it.next() orelse {
         std.debug.print("RENDERER: no shm_name in argv", .{});
         return error.MissingShmName;
+    };
+
+    const sock_path = it.next() orelse {
+        std.debug.print("RENDERER: no sock_path in argv\n", .{});
+        return error.MissingSockPath;
     };
 
     // Open the EXISTING region - no CREAT, the host already made it.
@@ -43,6 +49,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print("RENDERER: header OK - magic=0x{X} version={d} head={d} tail={d} via {s}\n", .{ header.magic, header.version, header.head, header.tail, shm_name });
+
+    const uaddr = try net.UnixAddress.init(sock_path);
+    const control = try uaddr.connect(init.io);
+    defer control.close(init.io);
+
+    std.debug.print("RENDERER: control channel connected\n", .{});
 
     // --- Producer: write one frame of draw commands, then publish ---
     const r = ring.Ring.init(mapping);

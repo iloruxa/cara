@@ -2,6 +2,7 @@ const draw = @import("draw");
 const glfw = @import("glfw");
 const ring = @import("ring");
 const std = @import("std");
+const net = std.Io.net;
 
 pub fn main(init: std.process.Init) !void {
     if (glfw.glfwInit() == glfw.GLFW_FALSE) {
@@ -59,11 +60,31 @@ pub fn main(init: std.process.Init) !void {
     header.tail = 0;
     std.debug.print("HOST: created {s}, header magic=0x{X} version={d}\n", .{ shm_name, header.magic, header.version });
 
+    // --- Control channel: a named Unix socket the renderer connects back on ---
+    var sock_buf: [64]u8 = undefined;
+    const sock_path = try std.fmt.bufPrint(&sock_buf, "/tmp/cara-sock-{d}", .{std.c.getpid()});
+
+    // Self-heal a stale socket from a prior crash (FileNotFound is the normal case).
+    std.Io.Dir.deleteFileAbsolute(init.io, sock_path) catch {};
+
+    const uaddr = try net.UnixAddress.init(sock_path);
+    var server = try uaddr.listen(init.io, .{});
+    defer {
+        server.deinit(init.io);
+        std.Io.Dir.deleteFileAbsolute(init.io, sock_path) catch {};
+    }
+
     // Spawn renderer engine
-    spawnRenderer(init.io, init.gpa, shm_name) catch |err| {
+    spawnRenderer(init.io, init.gpa, shm_name, sock_path) catch |err| {
         std.debug.print("Failed to spawn renderer: {s}\n", .{@errorName(err)});
         return err;
     };
+
+    // Block until the renderer connects back on the control channel.
+    const control = try server.accept(init.io);
+    defer control.close(init.io);
+
+    std.debug.print("HOST: control channel connected\n", .{});
 
     // --- Consumer: drain the frame the renderer published ---
     const r = ring.Ring.init(mapping);
@@ -113,13 +134,13 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8) !void {
+fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, sock_pth: []const u8) !void {
     const self_dir = try std.process.executableDirPathAlloc(io, gpa);
     defer gpa.free(self_dir);
 
     const renderer_path = try std.fs.path.join(gpa, &.{ self_dir, "cara-renderer" });
     defer gpa.free(renderer_path);
 
-    const argv = [_][]const u8{ renderer_path, shm_name };
+    const argv = [_][]const u8{ renderer_path, shm_name, sock_pth };
     _ = try std.process.spawn(io, .{ .argv = &argv });
 }
