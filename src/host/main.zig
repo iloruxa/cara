@@ -92,59 +92,40 @@ pub fn main(init: std.process.Init) !void {
     // --- Consumer: drain the frame the renderer published ---
     const r = ring.Ring.init(mapping);
 
-    // --- Wait for the renderer to signal a frame, then drain it ---
-    // Blocks on the control socket.
-    var msg: protocol.MsgHeader = undefined;
-    const msg_bytes = std.mem.asBytes(&msg);
-    var got: usize = 0;
+    // Hand the control channel to a dedicated thread that wakes the main loop
+    // whenever a frame arrives. The main thread stays parked in glfwWaitEvents().
+    const ipc = try std.Thread.spawn(.{}, controlLoop, .{ control, init.io });
 
-    while (got < msg_bytes.len) {
-        var bufs: [1][]u8 = .{msg_bytes[got..]};
-        const n = control.read(init.io, &bufs) catch |err| {
-            std.debug.print("HOST: control read failed: {s}\n", .{@errorName(err)});
-            return err;
-        };
-
-        if (n == 0) {
-            std.debug.print("HOST: renderer closed the control channel before FrameReady\n", .{});
-            return error.ControlClosed;
-        }
-
-        got += n;
-    }
-
-    switch (@as(protocol.MsgKind, @enumFromInt(msg.kind))) {
-        .frame_ready => {
-            std.debug.print("HOST: FrameReady received - draining the ring\n", .{});
-
-            if (r.reader()) |frame| {
-                var rd = frame;
-                while (rd.next()) |rec| {
-                    switch (@as(draw.DrawTag, @enumFromInt(rec.tag))) {
-                        .rect => {
-                            if (rec.bytes.len != @sizeOf(draw.DrawRect)) {
-                                std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{rec.bytes.len});
-                                continue;
-                            }
-
-                            const cmd: *const draw.DrawRect = @ptrCast(@alignCast(rec.bytes.ptr));
-                            std.debug.print("HOST: DrawRect x={d} y={d} w={d} h={d} rgba=0x{X}\n", .{ cmd.x, cmd.y, cmd.w, cmd.h, cmd.rbga });
-                        },
-                        else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ rec.tag, rec.bytes.len }),
-                    }
-                }
-                rd.commit();
-            } else {
-                std.debug.print("HOST: FrameReady but the ring was empty\n", .{});
-            }
-        },
-        else => std.debug.print("HOST: unexpected control message kind={d}\n", .{msg.kind}),
-    }
-
-    // Window event loop
+    // Wakes on OS events and on FrameReady (posted by the IPC thread).
+    // On each wake, drain whatever the renderer published - a no-op if the ring is empty
     while (glfw.glfwWindowShouldClose(window) == glfw.GLFW_FALSE) {
         glfw.glfwWaitEvents();
+
+        if (r.reader()) |frame| {
+            var rd = frame;
+
+            while (rd.next()) |rec| {
+                switch (@as(draw.DrawTag, @enumFromInt(rec.tag))) {
+                    .rect => {
+                        if (rec.bytes.len != @sizeOf(draw.DrawRect)) {
+                            std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{rec.bytes.len});
+                            continue;
+                        }
+
+                        const cmd: *const draw.DrawRect = @ptrCast(@alignCast(rec.bytes.ptr));
+                        std.debug.print("HOST: DrawRect x={d} y={d} w={d} h={d} rgba=0x{X}\n", .{ cmd.x, cmd.y, cmd.w, cmd.h, cmd.rgba });
+                    },
+                    else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ rec.tag, rec.bytes.len }),
+                }
+            }
+
+            rd.commit();
+        }
     }
+
+    // Window closing: unblock the IPC thread's blocking read, then join it.
+    control.shutdown(init.io, .both) catch {};
+    ipc.join();
 }
 
 fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, sock_pth: []const u8) !void {
@@ -156,4 +137,34 @@ fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, soc
 
     const argv = [_][]const u8{ renderer_path, shm_name, sock_pth };
     _ = try std.process.spawn(io, .{ .argv = &argv });
+}
+
+// RUns on its own thread: blocks reading control messages and, for each FrameReady, wakes the GLFW main loop.
+// glfwPostEmptyEvent is documented thread-safe - nice thing for this.
+fn controlLoop(control: std.Io.net.Stream, io: std.Io) void {
+    while (true) {
+        var msg: protocol.MsgHeader = undefined;
+        const bytes = std.mem.asBytes(&msg);
+        var got: usize = 0;
+
+        while (got < bytes.len) {
+            var bufs: [1][]u8 = .{bytes[got..]};
+            const n = control.read(io, &bufs) catch |err| {
+                std.debug.print("IPC: control read failed: {s}\n", .{@errorName(err)});
+                return;
+            };
+
+            if (n == 0) {
+                std.debug.print("IPC: control channel closed\n", .{});
+                return;
+            }
+
+            got += n;
+        }
+
+        switch (@as(protocol.MsgKind, @enumFromInt(msg.kind))) {
+            .frame_ready => glfw.glfwPostEmptyEvent(),
+            else => std.debug.print("IPC: unexpected message kind={d}\n", .{msg.kind}),
+        }
+    }
 }

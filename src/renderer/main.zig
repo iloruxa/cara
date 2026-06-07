@@ -63,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     const r = ring.Ring.init(mapping);
     var w = r.writer();
 
-    const rect = draw.DrawRect{ .x = 32, .y = 48, .w = 240, .h = 120, .rbga = 0x3B82F6FF };
+    const rect = draw.DrawRect{ .x = 32, .y = 48, .w = 240, .h = 120, .rgba = 0x3B82F6FF };
 
     w.append(@intFromEnum(draw.DrawTag.rect), std.mem.asBytes(&rect)) catch |err| {
         std.debug.print("RENDERER: append failed: {s}\n", .{@errorName(err)});

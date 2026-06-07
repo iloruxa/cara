@@ -21,7 +21,7 @@ pub const DrawTag = enum(u32) {
 /// Fill an axis-aligned rectangle.
 /// Coordinates are f32 pixels;
 /// rgba packs the colour as 0xRRGGBBAA.
-pub const DrawRect = extern struct { x: f32, y: f32, w: f32, h: f32, rbga: u32 };
+pub const DrawRect = extern struct { x: f32, y: f32, w: f32, h: f32, rgba: u32 };
 
 comptime {
     // Must drop onto the ring's 8-aligned payload and be @ptrCast in place.
