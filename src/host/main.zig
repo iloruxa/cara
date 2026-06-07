@@ -81,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (frame) |*rd| {
         while (rd.next()) |rec| {
-            std.debug.print("HOST: consumed {d} bytes: \"{s}\"\n", .{ rec.len, rec });
+            std.debug.print("HOST: consumed tag={d}, {d} bytes: \"{s}\"\n", .{ rec.tag, rec.bytes.len, rec.bytes });
         }
 
         rd.commit(); // release the whole frame with one Release-store

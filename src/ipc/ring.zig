@@ -75,13 +75,14 @@ comptime {
 /// a misaligned @alignCast panics in safe builds
 pub const RecordHeader = extern struct {
     len: u32, // payload byte count, or `skip_marker`
-    _reserved: u32 = 0, // becomes the DrawCommand tag later
+    tag: u32 = 0, // caller-defined record type; 0 = unset
 };
 
 pub const record_header_size = @sizeOf(RecordHeader); // == 8
 
-/// A `len` no real record can carry (max real len < payload_size): "no payload"
-/// here - skip to the buffer base and read the real record there
+/// A `len` no real record can carry -
+/// (max real len < payload_size): "no payload" here.
+/// Skip to the buffer base and read the real record there
 pub const skip_marker: u32 = 0xFFFF_FFFF;
 
 pub const PushError = error{ RingFull, RecordTooLarge };
@@ -165,7 +166,7 @@ pub const Ring = struct {
         head: u32, // local working cursor - unpublished
         tail: u32, // last-known consumer tail (acquire snapshot)
 
-        pub fn append(self: *Writer, record: []const u8) PushError!void {
+        pub fn append(self: *Writer, tag: u32, record: []const u8) PushError!void {
             if (record.len > payload_size) return error.RecordTooLarge;
 
             const len: u32 = @intCast(record.len);
@@ -190,7 +191,7 @@ pub const Ring = struct {
                 idx = 0; // real record restarts at the buffer base
             }
 
-            self.ring.putHeader(idx, .{ .len = len });
+            self.ring.putHeader(idx, .{ .len = len, .tag = tag });
 
             @memcpy(self.ring.payload[idx + record_header_size ..][0..len], record);
 
@@ -210,23 +211,31 @@ pub const Ring = struct {
         head: u32, // acquire snapshot - all bytes below this are visible
         tail: u32, // local working cursor
 
+        pub const Record = struct {
+            tag: u32,
+            bytes: []const u8, // in-place view into the ring paylaod
+        };
+
         /// Next record as an in-place view (no copy), or null when the frame's drained
-        pub fn next(self: *Reader) ?[]const u8 {
+        pub fn next(self: *Reader) ?Record {
             if (self.head -% self.tail == 0) return null;
 
             var idx = self.tail % payload_size;
             var step: u32 = 0;
 
+            // skips the pad, and read the real record at the base
             if (self.ring.getHeader(idx).len == skip_marker) {
-                step += payload_size - idx; // skip the pad...
-                idx = 0; // ... and read the real record at the base
+                step += payload_size - idx;
+                idx = 0;
             }
 
-            const len = self.ring.getHeader(idx).len;
-            step += frameSize(len);
+            // Read len + tag together
+            const hdr = self.ring.getHeader(idx);
+
+            step += frameSize(hdr.len);
             self.tail +%= step;
 
-            return self.ring.payload[idx + record_header_size ..][0..len];
+            return .{ .tag = hdr.tag, .bytes = self.ring.payload[idx + record_header_size ..][0..hdr.len] };
         }
 
         /// Release the whole drained frame at once. Symmetric to Writer.commit
@@ -245,38 +254,47 @@ fn freshRing(backing: []align(cache_line) u8) Ring {
     return Ring.init(backing);
 }
 
-test "one record round-trips byte-for-byte" {
+test "one record round-trips byte-for-byte, tag intact" {
     var backing: [region_size]u8 align(cache_line) = undefined;
     const r = freshRing(&backing);
 
     var w = r.writer();
-    try w.append("HELLO CARA");
+    try w.append(42, "HELLO CARA");
     w.commit();
 
     var rd = r.reader() orelse return error.Empty;
-    try testing.expectEqualSlices(u8, "HELLO CARA", rd.next().?);
+    const rec = rd.next() orelse return error.Empty;
+    try testing.expectEqual(@as(u32, 42), rec.tag);
+    try testing.expectEqualSlices(u8, "HELLO CARA", rec.bytes);
     try testing.expect(rd.next() == null);
     rd.commit();
     try testing.expect(r.reader() == null); // fully drained
 }
 
-test "a frame of many records: one publish, one drain" {
+test "a frame of many records: tags and bytes both intact" {
     var backing: [region_size]u8 align(cache_line) = undefined;
     const r = freshRing(&backing);
 
     var w = r.writer();
     var i: u8 = 0;
+
     while (i < 32) : (i += 1) {
-        try w.append(&[_]u8{ i, i +% 1, i +% 2, i +% 3 });
+        // u8 widens to the u32 tag
+        try w.append(i, &[_]u8{ i, i +% 1, i +% 2, i +% 3 });
     }
+
     w.commit(); // single Release-store for all 32 records
 
     var rd = r.reader() orelse return error.Empty; // single Acquire-load
     var seen: u8 = 0;
+
     while (rd.next()) |rec| : (seen += 1) {
-        try testing.expectEqualSlices(u8, &[_]u8{ seen, seen +% 1, seen +% 2, seen +% 3 }, rec);
+        try testing.expectEqual(@as(u32, seen), rec.tag);
+        try testing.expectEqualSlices(u8, &[_]u8{ seen, seen +% 1, seen +% 2, seen +% 3 }, rec.bytes);
     }
+
     rd.commit();
+
     try testing.expectEqual(@as(u8, 32), seen);
 }
 
@@ -292,11 +310,11 @@ test "varying-length stream stays intact across many wraparounds" {
         for (0..len) |k| buf[k] = @truncate(seed +% @as(u32, @intCast(k)));
 
         var w = r.writer();
-        try w.append(buf[0..len]);
+        try w.append(0, buf[0..len]);
         w.commit();
 
         var rd = r.reader() orelse return error.Empty;
-        try testing.expectEqualSlices(u8, buf[0..len], rd.next().?);
+        try testing.expectEqualSlices(u8, buf[0..len], rd.next().?.bytes);
         rd.commit();
 
         seed = seed *% 1664525 +% 1013904223; // LCG: deterministic, reproducible
@@ -311,7 +329,7 @@ test "writer reports RingFull without clobbering unread bytes" {
     var w = r.writer();
     var pushed: u32 = 0;
     while (true) {
-        w.append(rec) catch break;
+        w.append(0, rec) catch break;
         pushed += 1;
     }
     w.commit();
@@ -320,7 +338,7 @@ test "writer reports RingFull without clobbering unread bytes" {
     var rd = r.reader() orelse return error.Empty;
     var drained: u32 = 0;
     while (rd.next()) |got| : (drained += 1) {
-        try testing.expectEqualSlices(u8, rec, got);
+        try testing.expectEqualSlices(u8, rec, got.bytes);
     }
     rd.commit();
     try testing.expectEqual(pushed, drained); // nothing overwritten under backpressure
@@ -331,5 +349,5 @@ test "oversized record is rejected, not truncated" {
     const r = freshRing(&backing);
     var huge: [payload_size]u8 = undefined;
     var w = r.writer();
-    try testing.expectError(error.RecordTooLarge, w.append(&huge));
+    try testing.expectError(error.RecordTooLarge, w.append(0, &huge));
 }

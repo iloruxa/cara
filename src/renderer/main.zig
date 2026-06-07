@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     const r = ring.Ring.init(mapping);
     var w = r.writer();
 
-    w.append("HELLO CARA") catch |err| {
+    w.append(0, "HELLO CARA") catch |err| {
         std.debug.print("RENDERER: append failed: {s}\n", .{@errorName(err)});
         return err;
     };
