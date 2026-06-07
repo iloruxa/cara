@@ -3,6 +3,7 @@ const glfw = @import("glfw");
 const protocol = @import("protocol");
 const ring = @import("ring");
 const std = @import("std");
+const wgpu = @import("wgpu");
 
 // Dependent imports
 const net = std.Io.net;
@@ -23,6 +24,16 @@ pub fn main(init: std.process.Init) !void {
     defer glfw.glfwDestroyWindow(window);
 
     std.debug.print("Cara host started\n", .{});
+
+    // --- GPU smoke: prove wgpu-native links ---
+    const v = wgpu.wgpuGetVersion();
+    std.debug.print("HOST: wgpu-native v{d}.{d}.{d}.{d}\n", .{ (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF });
+
+    const instance = wgpu.wgpuCreateInstance(null) orelse {
+        std.debug.print("HOST: wgpuCreateInstance failed\n", .{});
+        return error.WgpuInstanceFailed;
+    };
+    defer wgpu.wgpuInstanceRelease(instance);
 
     // --- Shared memory region ---
     // Created here, owned by the host for the whole process lifetime,

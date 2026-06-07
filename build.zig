@@ -74,6 +74,22 @@ pub fn build(b: *std.Build) !void {
     const run_protocol_tests = b.addRunArtifact(protocol_tests);
     test_step.dependOn(&run_protocol_tests.step);
 
+    // --- GPU: wgpu-native (WebGPU), prebuilt static lib + translate-c bindings ---
+    const wgpu_module = b.createModule(.{
+        .root_source_file = b.path("vendor/wgpu.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    host.root_module.addImport("wgpu", wgpu_module);
+
+    // Link the prebuilt archive + the frameworks its Metal backed needs.
+    // (IOKit + CoreFoundation already come in via glfw)
+    host.root_module.addObjectFile(b.path("vendor/wgpu/lib/libwgpu_native.a"));
+    host.root_module.linkFramework("Metal", .{});
+    host.root_module.linkFramework("QuartzCore", .{});
+    host.root_module.linkFramework("Foundation", .{});
+    host.root_module.linkFramework("IOSurface", .{});
+
     // --- RUN STEP ---
     //
     // `zig build run` runs the host, which will eventually spawn the renderer.
