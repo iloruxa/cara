@@ -32,6 +32,8 @@ pub fn build(b: *std.Build) !void {
     renderer.root_module.link_libc = true;
     b.installArtifact(renderer);
 
+    // --- IPC ---
+    //
     // Shared IPC wire-format, imported by both processes so the host and
     // renderer agree on the region layout from one source of truth.
     const ring_module = b.createModule(.{
@@ -42,11 +44,26 @@ pub fn build(b: *std.Build) !void {
     host.root_module.addImport("ring", ring_module);
     renderer.root_module.addImport("ring", ring_module);
 
+    // IPC: Ring tests
     const ring_tests = b.addTest(.{ .root_module = ring_module });
     const run_ring_tests = b.addRunArtifact(ring_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_ring_tests.step);
 
+    // IPC: Draw Module
+    const draw_module = b.createModule(.{
+        .root_source_file = b.path("src/ipc/draw_command.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // IPC: Draw module tests
+    const draw_tests = b.addTest(.{ .root_module = draw_module });
+    const run_draw_tests = b.addRunArtifact(draw_tests);
+    test_step.dependOn(&run_draw_tests.step);
+
+    // --- RUN STEP ---
+    //
     // `zig build run` runs the host, which will eventually spawn the renderer.
     const run_host = b.addSystemCommand(&.{"./zig-out/bin/Cara"});
     run_host.step.dependOn(b.getInstallStep());
