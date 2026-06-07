@@ -100,7 +100,6 @@ pub fn main(init: std.process.Init) !void {
 
                 else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ rec.tag, rec.bytes.len }),
             }
-            std.debug.print("HOST: consumed tag={d}, {d} bytes: \"{s}\"\n", .{ rec.tag, rec.bytes.len, rec.bytes });
         }
 
         rd.commit(); // release the whole frame with one Release-store
