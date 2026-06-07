@@ -64,6 +64,14 @@ pub fn build(b: *std.Build) !void {
     const run_draw_tests = b.addRunArtifact(draw_tests);
     test_step.dependOn(&run_draw_tests.step);
 
+    // IPC: Control-channel protocol
+    const protocol_module = b.createModule(.{ .root_source_file = b.path("src/ipc/protocol.zig"), .target = target, .optimize = optimize });
+
+    // IPC: Control-channel protocol tests
+    const protocol_tests = b.addTest(.{ .root_module = protocol_module });
+    const run_protocol_tests = b.addRunArtifact(protocol_tests);
+    test_step.dependOn(&run_protocol_tests.step);
+
     // --- RUN STEP ---
     //
     // `zig build run` runs the host, which will eventually spawn the renderer.
