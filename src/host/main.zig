@@ -1,6 +1,7 @@
-const std = @import("std");
+const draw = @import("draw");
 const glfw = @import("glfw");
 const ring = @import("ring");
+const std = @import("std");
 
 pub fn main(init: std.process.Init) !void {
     if (glfw.glfwInit() == glfw.GLFW_FALSE) {
@@ -79,8 +80,26 @@ pub fn main(init: std.process.Init) !void {
         if (frame != null) break;
     }
 
+    // Drain loop
     if (frame) |*rd| {
         while (rd.next()) |rec| {
+            switch (@as(draw.DrawTag, @enumFromInt(rec.tag))) {
+                .rect => {
+                    // Host validates the (sandboxed, untrusted) renderer's payload
+                    // before trusting its shape.
+                    if (rec.bytes.len != @sizeOf(draw.DrawRect)) {
+                        std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{rec.bytes.len});
+                        continue;
+                    }
+
+                    // Decode in-place: no copy. Payload is 8-aligned by construction.
+                    const cmd: *const draw.DrawRect = @ptrCast(@alignCast(rec.bytes.ptr));
+
+                    std.debug.print("HOST: DrawRect x={d} y={d} w={d} h={d} rgba=0x{X}", .{ cmd.x, cmd.y, cmd.w, cmd.h, cmd.rbga });
+                },
+
+                else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ rec.tag, rec.bytes.len }),
+            }
             std.debug.print("HOST: consumed tag={d}, {d} bytes: \"{s}\"\n", .{ rec.tag, rec.bytes.len, rec.bytes });
         }
 

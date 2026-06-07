@@ -56,6 +56,8 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    host.root_module.addImport("draw", draw_module);
+    renderer.root_module.addImport("draw", draw_module);
 
     // IPC: Draw module tests
     const draw_tests = b.addTest(.{ .root_module = draw_module });

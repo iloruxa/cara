@@ -1,5 +1,6 @@
-const std = @import("std");
+const draw = @import("draw");
 const ring = @import("ring");
+const std = @import("std");
 
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Cara renderer started\n", .{});
@@ -43,11 +44,13 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("RENDERER: header OK - magic=0x{X} version={d} head={d} tail={d} via {s}\n", .{ header.magic, header.version, header.head, header.tail, shm_name });
 
-    // --- Producer: write one frame into the ring, then publish ---
+    // --- Producer: write one frame of draw commands, then publish ---
     const r = ring.Ring.init(mapping);
     var w = r.writer();
 
-    w.append(0, "HELLO CARA") catch |err| {
+    const rect = draw.DrawRect{ .x = 32, .y = 48, .w = 240, .h = 120, .rbga = 0x3B82F6FF };
+
+    w.append(@intFromEnum(draw.DrawTag.rect), std.mem.asBytes(&rect)) catch |err| {
         std.debug.print("RENDERER: append failed: {s}\n", .{@errorName(err)});
         return err;
     };
@@ -55,5 +58,5 @@ pub fn main(init: std.process.Init) !void {
     // Publish the whole frame with one Release-store
     w.commit();
 
-    std.debug.print("RENDERER: committed frame, head now {d}\n", .{header.head});
+    std.debug.print("RENDERER: committed frame ({d}-byte DrawRect), head now {d}\n", .{ @sizeOf(draw.DrawRect), header.head });
 }
