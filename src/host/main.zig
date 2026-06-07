@@ -8,6 +8,13 @@ const wgpu = @import("wgpu");
 // Dependent imports
 const net = std.Io.net;
 
+// For creating CAMetalLayer
+// Cocoa = Ojb-C --- No zig-native path :( ---
+extern fn glfwGetCocoaWindow(window: ?*anyopaque) ?*anyopaque;
+extern fn objc_getClass(name: [*:0]const u8) ?*anyopaque;
+extern fn sel_registerName(name: [*:0]const u8) ?*anyopaque;
+extern fn objc_msgSend() void;
+
 pub fn main(init: std.process.Init) !void {
     if (glfw.glfwInit() == glfw.GLFW_FALSE) {
         std.debug.print("Failed to initialize glfw", .{});
@@ -34,6 +41,26 @@ pub fn main(init: std.process.Init) !void {
         return error.WgpuInstanceFailed;
     };
     defer wgpu.wgpuInstanceRelease(instance);
+
+    // --- A Metal surface on the GLFW window ---
+    const ns_window = glfwGetCocoaWindow(window) orelse return error.NoCocoaWindow;
+    const metal_layer = metalLayerForWindow(ns_window) orelse return error.NoMetalLayer;
+
+    var metal_source = wgpu.WGPUSurfaceSourceMetalLayer{
+        // next defaults null
+        .chain = .{ .sType = @intCast(wgpu.WGPUSType_SurfaceSourceMetalLayer) },
+        .layer = metal_layer,
+    };
+
+    const surface_desc = wgpu.WGPUSurfaceDescriptor{
+        // label defaults empty
+        .nextInChain = &metal_source.chain,
+    };
+
+    const surface = wgpu.wgpuInstanceCreateSurface(instance, &surface_desc) orelse return error.SurfaceFailed;
+    defer wgpu.wgpuSurfaceRelease(surface);
+
+    std.debug.print("HOST: wgpu Metal surface created\n", .{});
 
     // --- Shared memory region ---
     // Created here, owned by the host for the whole process lifetime,
@@ -178,4 +205,19 @@ fn controlLoop(control: std.Io.net.Stream, io: std.Io) void {
             else => std.debug.print("IPC: unexpected message kind={d}\n", .{msg.kind}),
         }
     }
+}
+
+fn metalLayerForWindow(ns_window: ?*anyopaque) ?*anyopaque {
+    const msg_id = @as(*const fn (?*anyopaque, ?*anyopaque) callconv(.c) ?*anyopaque, @ptrCast(&objc_msgSend));
+    const msg_set_id = @as(*const fn (?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void, @ptrCast(&objc_msgSend));
+    const msg_set_bool = @as(*const fn (?*anyopaque, ?*anyopaque, bool) callconv(.c) void, @ptrCast(&objc_msgSend));
+
+    const view = msg_id(ns_window, sel_registerName("contentView")) orelse
+        return null;
+    const layer = msg_id(objc_getClass("CAMetalLayer"), sel_registerName("layer")) orelse return null;
+
+    msg_set_bool(view, sel_registerName("setWantsLayer:"), true);
+    msg_set_id(view, sel_registerName("setLayer:"), layer);
+
+    return layer;
 }
