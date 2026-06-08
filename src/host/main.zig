@@ -4,19 +4,179 @@ const protocol = @import("protocol");
 const ring = @import("ring");
 const std = @import("std");
 const wgpu = @import("wgpu");
-
-// Dependent imports
 const net = std.Io.net;
 
-// For creating CAMetalLayer
-// Cocoa = Ojb-C --- No zig-native path :( ---
+// --- Cocoa = Ojb-C glue : No zig-native path for creating CAMetalLayer ---
 extern fn glfwGetCocoaWindow(window: ?*anyopaque) ?*anyopaque;
 extern fn objc_getClass(name: [*:0]const u8) ?*anyopaque;
 extern fn sel_registerName(name: [*:0]const u8) ?*anyopaque;
 extern fn objc_msgSend() void;
 
+fn metalLayerForWindow(ns_window: ?*anyopaque) ?*anyopaque {
+    const msg_id = @as(*const fn (?*anyopaque, ?*anyopaque) callconv(.c) ?*anyopaque, @ptrCast(&objc_msgSend));
+    const msg_set_id = @as(*const fn (?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void, @ptrCast(&objc_msgSend));
+    const msg_set_bool = @as(*const fn (?*anyopaque, ?*anyopaque, bool) callconv(.c) void, @ptrCast(&objc_msgSend));
+
+    const view = msg_id(ns_window, sel_registerName("contentView")) orelse
+        return null;
+    const layer = msg_id(objc_getClass("CAMetalLayer"), sel_registerName("layer")) orelse return null;
+
+    msg_set_bool(view, sel_registerName("setWantsLayer:"), true);
+    msg_set_id(view, sel_registerName("setLayer:"), layer);
+
+    return layer;
+}
+
+// --- GPU: adapter/device async requests ---
 const AdapterReq = struct { adapter: wgpu.WGPUAdapter = null, done: bool = false };
+
+fn onAdapter(status: wgpu.WGPURequestAdapterStatus, adapter: wgpu.WGPUAdapter, message: wgpu.WGPUStringView, ud1: ?*anyopaque, ud2: ?*anyopaque) callconv(.c) void {
+    _ = status;
+    _ = message;
+    _ = ud2;
+
+    const req: *AdapterReq = @ptrCast(@alignCast(ud1));
+    req.adapter = adapter;
+    req.done = true;
+}
+
 const DeviceReq = struct { device: wgpu.WGPUDevice = null, done: bool = false };
+
+fn onDevice(status: wgpu.WGPURequestDeviceStatus, device: wgpu.WGPUDevice, message: wgpu.WGPUStringView, ud1: ?*anyopaque, ud2: ?*anyopaque) callconv(.c) void {
+    _ = status;
+    _ = message;
+    _ = ud2;
+
+    const req: *DeviceReq = @ptrCast(@alignCast(ud1));
+    req.device = device;
+    req.done = true;
+}
+
+// --- GPU: rectangle pipeline ---
+// Multi-line string
+const rect_wgsl =
+    \\@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    \\    var p = array<vec2<f32>, 3>(
+    \\        vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0)
+    \\    );
+    \\    return vec4<f32>(p[i], 0.0, 1.0);
+    \\}
+    \\@fragment fn fs() -> @location(0) vec4<f32> {
+    \\    return vec4<f32>(0.231, 0.510, 0.965, 1.0); // 0x3B82F6 — hardcoded; P3-2b: from rgba
+    \\}
+;
+
+fn sv(s: []const u8) wgpu.WGPUStringView {
+    return .{
+        .data = s.ptr,
+        .length = s.len,
+    };
+}
+
+fn createRectPipeline(device: wgpu.WGPUDevice) ?wgpu.WGPURenderPipeline {
+    var wgsl = wgpu.WGPUShaderSourceWGSL{
+        .chain = .{ .sType = @intCast(wgpu.WGPUSType_ShaderSourceWGSL) },
+        .code = sv(rect_wgsl),
+    };
+    const sm_desc = wgpu.WGPUShaderModuleDescriptor{ .nextInChain = &wgsl.chain };
+    const module = wgpu.wgpuDeviceCreateShaderModule(device, &sm_desc) orelse return null;
+    defer wgpu.wgpuShaderModuleRelease(module);
+
+    const color_target = wgpu.WGPUColorTargetState{
+        .format = @intCast(wgpu.WGPUTextureFormat_BGRA8Unorm),
+        .writeMask = wgpu.WGPUColorWriteMask_All,
+    };
+
+    const fragment = wgpu.WGPUFragmentState{
+        .module = module,
+        .entryPoint = sv("fs"),
+        .targetCount = 1,
+        .targets = &color_target,
+    };
+    const desc = wgpu.WGPURenderPipelineDescriptor{
+        .vertex = .{ .module = module, .entryPoint = sv("vs") },
+        .primitive = .{
+            .topology = @intCast(wgpu.WGPUPrimitiveTopology_TriangleList),
+            .frontFace = @intCast(wgpu.WGPUFrontFace_CCW),
+            .cullMode = @intCast(wgpu.WGPUCullMode_None),
+        },
+        .multisample = .{ .count = 1, .mask = 0xFFFF_FFFF },
+        .fragment = &fragment,
+    };
+
+    return wgpu.wgpuDeviceCreateRenderPipeline(device, &desc);
+}
+
+// --- per-frame paint: clear, then the rect (scissor-clipped) ---
+fn paint(surface: wgpu.WGPUSurface, device: wgpu.WGPUDevice, queue: wgpu.WGPUQueue, pipeline: wgpu.WGPURenderPipeline, rect: ?draw.DrawRect) void {
+    var st: wgpu.WGPUSurfaceTexture = undefined;
+    wgpu.wgpuSurfaceGetCurrentTexture(surface, &st);
+
+    const texture = st.texture orelse return;
+    defer wgpu.wgpuTextureRelease(texture);
+
+    const view = wgpu.wgpuTextureCreateView(texture, null) orelse return;
+    defer wgpu.wgpuTextureViewRelease(view);
+
+    const encoder = wgpu.wgpuDeviceCreateCommandEncoder(device, null) orelse return;
+    defer wgpu.wgpuCommandEncoderRelease(encoder);
+
+    const color = wgpu.WGPURenderPassColorAttachment{
+        .view = view,
+        .depthSlice = @intCast(wgpu.WGPU_DEPTH_SLICE_UNDEFINED),
+        .loadOp = @intCast(wgpu.WGPULoadOp_Clear),
+        .storeOp = @intCast(wgpu.WGPUStoreOp_Store),
+        .clearValue = .{ .r = 0.05, .g = 0.06, .b = 0.09, .a = 1.0 },
+    };
+    const pass_desc = wgpu.WGPURenderPassDescriptor{ .colorAttachmentCount = 1, .colorAttachments = &color };
+    const pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc) orelse return;
+
+    if (rect) |rr| {
+        wgpu.wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        wgpu.wgpuRenderPassEncoderSetScissorRect(pass, @intFromFloat(rr.x), @intFromFloat(rr.y), @intFromFloat(rr.w), @intFromFloat(rr.h));
+        // full-screen triangle, clipped to the box
+        wgpu.wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+    }
+
+    wgpu.wgpuRenderPassEncoderEnd(pass);
+    wgpu.wgpuRenderPassEncoderRelease(pass);
+
+    const cmd = wgpu.wgpuCommandEncoderFinish(encoder, null) orelse return;
+    defer wgpu.wgpuCommandBufferRelease(cmd);
+
+    const cmds = [_]wgpu.WGPUCommandBuffer{cmd};
+    wgpu.wgpuQueueSubmit(queue, cmds.len, &cmds);
+    _ = wgpu.wgpuSurfacePresent(surface);
+}
+
+// --- IPC Thread: wake the GLFW loop on each FrameReady ---
+fn controlLoop(control: std.Io.net.Stream, io: std.Io) void {
+    while (true) {
+        var msg: protocol.MsgHeader = undefined;
+        const bytes = std.mem.asBytes(&msg);
+        var got: usize = 0;
+
+        while (got < bytes.len) {
+            var bufs: [1][]u8 = .{bytes[got..]};
+            const n = control.read(io, &bufs) catch |err| {
+                std.debug.print("IPC: control read failed: {s}\n", .{@errorName(err)});
+                return;
+            };
+
+            if (n == 0) {
+                std.debug.print("IPC: control channel closed\n", .{});
+                return;
+            }
+
+            got += n;
+        }
+
+        switch (@as(protocol.MsgKind, @enumFromInt(msg.kind))) {
+            .frame_ready => glfw.glfwPostEmptyEvent(),
+            else => std.debug.print("IPC: unexpected message kind={d}\n", .{msg.kind}),
+        }
+    }
+}
 
 pub fn main(init: std.process.Init) !void {
     if (glfw.glfwInit() == glfw.GLFW_FALSE) {
@@ -35,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Cara host started\n", .{});
 
-    // --- GPU smoke: prove wgpu-native links ---
+    // --- GPU: instance ---
     const v = wgpu.wgpuGetVersion();
     std.debug.print("HOST: wgpu-native v{d}.{d}.{d}.{d}\n", .{ (v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF });
 
@@ -45,7 +205,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer wgpu.wgpuInstanceRelease(instance);
 
-    // --- A Metal surface on the GLFW window ---
+    // --- GPU: Metal surface on the GLFW window ---
     const ns_window = glfwGetCocoaWindow(window) orelse return error.NoCocoaWindow;
     const metal_layer = metalLayerForWindow(ns_window) orelse return error.NoMetalLayer;
 
@@ -65,7 +225,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("HOST: wgpu Metal surface created\n", .{});
 
-    // --- adapter -> device -> queue : then configure the surface ---
+    // --- GPU: adapter -> device -> queue ---
     var areq = AdapterReq{};
     const adapter_opts = wgpu.WGPURequestAdapterOptions{ .compatibleSurface = surface };
     _ = wgpu.wgpuInstanceRequestAdapter(instance, &adapter_opts, .{
@@ -94,6 +254,7 @@ pub fn main(init: std.process.Init) !void {
     const queue = wgpu.wgpuDeviceGetQueue(device);
     defer wgpu.wgpuQueueRelease(queue);
 
+    // --- GPU: configure the surface to the framebuffer size ---
     var fb_w: c_int = 0;
     var fb_h: c_int = 0;
 
@@ -113,15 +274,13 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("HOST: adapter+device+queue ready, surface configured {d}x{d}\n", .{ config.width, config.height });
 
-    // --- Shared memory region ---
-    // Created here, owned by the host for the whole process lifetime,
-    // torn down on exit. The rendere will map this same region by name.
+    // --- GPU: rectangle pipeline ---
+    const rect_pipeline = createRectPipeline(device) orelse return;
+    defer wgpu.wgpuRenderPipelineRelease(rect_pipeline);
 
+    // --- Shared memory ring region ---
     var name_buf: [64]u8 = undefined;
     const shm_name = try std.fmt.bufPrintSentinel(&name_buf, "/cara-shm-{d}", .{std.c.getpid()}, 0);
-
-    // Clear any stale object a previously crashed run left under
-    // this name. "Not found" is the normal case, so the result is ignored.
     _ = std.c.shm_unlink(shm_name.ptr);
 
     const oflags: std.c.O = .{ .ACCMODE = .RDWR, .CREAT = true };
@@ -152,7 +311,7 @@ pub fn main(init: std.process.Init) !void {
     header.tail = 0;
     std.debug.print("HOST: created {s}, header magic=0x{X} version={d}\n", .{ shm_name, header.magic, header.version });
 
-    // --- Control channel: a named Unix socket the renderer connects back on ---
+    // --- Control channel: a named Unix socket (std.Io.net) ---
     var sock_buf: [64]u8 = undefined;
     const sock_path = try std.fmt.bufPrint(&sock_buf, "/tmp/cara-sock-{d}", .{std.c.getpid()});
 
@@ -166,7 +325,7 @@ pub fn main(init: std.process.Init) !void {
         std.Io.Dir.deleteFileAbsolute(init.io, sock_path) catch {};
     }
 
-    // Spawn renderer engine
+    // --- Spawn renderer engine (shm_name + socket pth) ---
     spawnRenderer(init.io, init.gpa, shm_name, sock_path) catch |err| {
         std.debug.print("Failed to spawn renderer: {s}\n", .{@errorName(err)});
         return err;
@@ -181,12 +340,12 @@ pub fn main(init: std.process.Init) !void {
     // --- Consumer: drain the frame the renderer published ---
     const r = ring.Ring.init(mapping);
 
-    // Hand the control channel to a dedicated thread that wakes the main loop
-    // whenever a frame arrives. The main thread stays parked in glfwWaitEvents().
+    // --- IPC thread + render loop ---
     const ipc = try std.Thread.spawn(.{}, controlLoop, .{ control, init.io });
 
     // First frame, so the window shows immediately
-    paintClear(surface, device, queue);
+    var current_rect: ?draw.DrawRect = null;
+    paint(surface, device, queue, rect_pipeline, current_rect);
 
     // Wakes on OS events and on FrameReady (posted by the IPC thread).
     // On each wake, drain whatever the renderer published - a no-op if the ring is empty
@@ -205,6 +364,7 @@ pub fn main(init: std.process.Init) !void {
                         }
 
                         const cmd: *const draw.DrawRect = @ptrCast(@alignCast(rec.bytes.ptr));
+                        current_rect = cmd.*;
                         std.debug.print("HOST: DrawRect x={d} y={d} w={d} h={d} rgba=0x{X}\n", .{ cmd.x, cmd.y, cmd.w, cmd.h, cmd.rgba });
                     },
                     else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ rec.tag, rec.bytes.len }),
@@ -215,7 +375,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // Repaint each wake
-        paintClear(surface, device, queue);
+        paint(surface, device, queue, rect_pipeline, current_rect);
     }
 
     // Window closing: unblock the IPC thread's blocking read, then join it.
@@ -232,110 +392,4 @@ fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, soc
 
     const argv = [_][]const u8{ renderer_path, shm_name, sock_pth };
     _ = try std.process.spawn(io, .{ .argv = &argv });
-}
-
-// RUns on its own thread: blocks reading control messages and, for each FrameReady, wakes the GLFW main loop.
-// glfwPostEmptyEvent is documented thread-safe - nice thing for this.
-fn controlLoop(control: std.Io.net.Stream, io: std.Io) void {
-    while (true) {
-        var msg: protocol.MsgHeader = undefined;
-        const bytes = std.mem.asBytes(&msg);
-        var got: usize = 0;
-
-        while (got < bytes.len) {
-            var bufs: [1][]u8 = .{bytes[got..]};
-            const n = control.read(io, &bufs) catch |err| {
-                std.debug.print("IPC: control read failed: {s}\n", .{@errorName(err)});
-                return;
-            };
-
-            if (n == 0) {
-                std.debug.print("IPC: control channel closed\n", .{});
-                return;
-            }
-
-            got += n;
-        }
-
-        switch (@as(protocol.MsgKind, @enumFromInt(msg.kind))) {
-            .frame_ready => glfw.glfwPostEmptyEvent(),
-            else => std.debug.print("IPC: unexpected message kind={d}\n", .{msg.kind}),
-        }
-    }
-}
-
-fn metalLayerForWindow(ns_window: ?*anyopaque) ?*anyopaque {
-    const msg_id = @as(*const fn (?*anyopaque, ?*anyopaque) callconv(.c) ?*anyopaque, @ptrCast(&objc_msgSend));
-    const msg_set_id = @as(*const fn (?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void, @ptrCast(&objc_msgSend));
-    const msg_set_bool = @as(*const fn (?*anyopaque, ?*anyopaque, bool) callconv(.c) void, @ptrCast(&objc_msgSend));
-
-    const view = msg_id(ns_window, sel_registerName("contentView")) orelse
-        return null;
-    const layer = msg_id(objc_getClass("CAMetalLayer"), sel_registerName("layer")) orelse return null;
-
-    msg_set_bool(view, sel_registerName("setWantsLayer:"), true);
-    msg_set_id(view, sel_registerName("setLayer:"), layer);
-
-    return layer;
-}
-
-fn onAdapter(status: wgpu.WGPURequestAdapterStatus, adapter: wgpu.WGPUAdapter, message: wgpu.WGPUStringView, ud1: ?*anyopaque, ud2: ?*anyopaque) callconv(.c) void {
-    _ = status;
-    _ = message;
-    _ = ud2;
-
-    const req: *AdapterReq = @ptrCast(@alignCast(ud1));
-    req.adapter = adapter;
-    req.done = true;
-}
-
-fn onDevice(status: wgpu.WGPURequestDeviceStatus, device: wgpu.WGPUDevice, message: wgpu.WGPUStringView, ud1: ?*anyopaque, ud2: ?*anyopaque) callconv(.c) void {
-    _ = status;
-    _ = message;
-    _ = ud2;
-
-    const req: *DeviceReq = @ptrCast(@alignCast(ud1));
-    req.device = device;
-    req.done = true;
-}
-
-fn paintClear(surface: wgpu.WGPUSurface, device: wgpu.WGPUDevice, queue: wgpu.WGPUQueue) void {
-    var st: wgpu.WGPUSurfaceTexture = undefined;
-
-    wgpu.wgpuSurfaceGetCurrentTexture(surface, &st);
-
-    const texture = st.texture orelse return;
-    defer wgpu.wgpuTextureRelease(texture);
-
-    const view = wgpu.wgpuTextureCreateView(texture, null) orelse return;
-    defer wgpu.wgpuTextureViewRelease(view);
-
-    const encoder = wgpu.wgpuDeviceCreateCommandEncoder(device, null) orelse return;
-    defer wgpu.wgpuCommandEncoderRelease(encoder);
-
-    const color = wgpu.WGPURenderPassColorAttachment{
-        .view = view,
-        // REQUIRED for a 2D attachment
-        .depthSlice = @intCast(wgpu.WGPU_DEPTH_SLICE_UNDEFINED),
-        .loadOp = @intCast(wgpu.WGPULoadOp_Clear),
-        .storeOp = @intCast(wgpu.WGPUStoreOp_Store),
-        // Dark slate
-        .clearValue = .{ .r = 0.05, .g = 0.06, .b = 0.09, .a = 1.0 },
-    };
-
-    const pass_desc = wgpu.WGPURenderPassDescriptor{
-        .colorAttachmentCount = 1,
-        .colorAttachments = &color,
-    };
-
-    const pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc) orelse return;
-    wgpu.wgpuRenderPassEncoderEnd(pass);
-
-    const cmd = wgpu.wgpuCommandEncoderFinish(encoder, null) orelse return;
-    defer wgpu.wgpuCommandBufferRelease(cmd);
-
-    const cmds = [_]wgpu.WGPUCommandBuffer{cmd};
-    wgpu.wgpuQueueSubmit(queue, cmds.len, &cmds);
-
-    _ = wgpu.wgpuSurfacePresent(surface);
 }
