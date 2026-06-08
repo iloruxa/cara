@@ -15,6 +15,9 @@ extern fn objc_getClass(name: [*:0]const u8) ?*anyopaque;
 extern fn sel_registerName(name: [*:0]const u8) ?*anyopaque;
 extern fn objc_msgSend() void;
 
+const AdapterReq = struct { adapter: wgpu.WGPUAdapter = null, done: bool = false };
+const DeviceReq = struct { device: wgpu.WGPUDevice = null, done: bool = false };
+
 pub fn main(init: std.process.Init) !void {
     if (glfw.glfwInit() == glfw.GLFW_FALSE) {
         std.debug.print("Failed to initialize glfw", .{});
@@ -61,6 +64,50 @@ pub fn main(init: std.process.Init) !void {
     defer wgpu.wgpuSurfaceRelease(surface);
 
     std.debug.print("HOST: wgpu Metal surface created\n", .{});
+
+    // --- adapter -> device -> queue : then configure the surface ---
+    var areq = AdapterReq{};
+    const adapter_opts = wgpu.WGPURequestAdapterOptions{ .compatibleSurface = surface };
+    _ = wgpu.wgpuInstanceRequestAdapter(instance, &adapter_opts, .{
+        .mode = @intCast(wgpu.WGPUCallbackMode_AllowProcessEvents),
+        .callback = &onAdapter,
+        .userdata1 = &areq,
+    });
+
+    if (!areq.done) wgpu.wgpuInstanceProcessEvents(instance);
+
+    const adapter = areq.adapter orelse return error.NoAdapter;
+    defer wgpu.wgpuAdapterRelease(adapter);
+
+    var dreq = DeviceReq{};
+    const device_desc = wgpu.WGPUDeviceDescriptor{};
+    _ = wgpu.wgpuAdapterRequestDevice(adapter, &device_desc, .{
+        .mode = @intCast(wgpu.WGPUCallbackMode_AllowProcessEvents),
+        .callback = &onDevice,
+        .userdata1 = &dreq,
+    });
+
+    if (!dreq.done) wgpu.wgpuInstanceProcessEvents(instance);
+    const device = dreq.device orelse return error.NoDevice;
+    defer wgpu.wgpuDeviceRelease(device);
+
+    const queue = wgpu.wgpuDeviceGetQueue(device);
+    defer wgpu.wgpuQueueRelease(queue);
+
+    const config = wgpu.WGPUSurfaceConfiguration{
+        .device = device,
+        .format = @intCast(wgpu.WGPUTextureFormat_BGRA8Unorm),
+        // Already WGPUTextureUsage-typed
+        .usage = wgpu.WGPUTextureUsage_RenderAttachment,
+        .width = 1024,
+        .height = 768,
+        .presentMode = @intCast(wgpu.WGPUPresentMode_Fifo),
+        .alphaMode = @intCast(wgpu.WGPUCompositeAlphaMode_Auto),
+    };
+
+    wgpu.wgpuSurfaceConfigure(surface, &config);
+
+    std.debug.print("HOST: adapter+device+queue ready, surface configured {d}x{d}\n", .{ config.width, config.height });
 
     // --- Shared memory region ---
     // Created here, owned by the host for the whole process lifetime,
@@ -220,4 +267,24 @@ fn metalLayerForWindow(ns_window: ?*anyopaque) ?*anyopaque {
     msg_set_id(view, sel_registerName("setLayer:"), layer);
 
     return layer;
+}
+
+fn onAdapter(status: wgpu.WGPURequestAdapterStatus, adapter: wgpu.WGPUAdapter, message: wgpu.WGPUStringView, ud1: ?*anyopaque, ud2: ?*anyopaque) callconv(.c) void {
+    _ = status;
+    _ = message;
+    _ = ud2;
+
+    const req: *AdapterReq = @ptrCast(@alignCast(ud1));
+    req.adapter = adapter;
+    req.done = true;
+}
+
+fn onDevice(status: wgpu.WGPURequestDeviceStatus, device: wgpu.WGPUDevice, message: wgpu.WGPUStringView, ud1: ?*anyopaque, ud2: ?*anyopaque) callconv(.c) void {
+    _ = status;
+    _ = message;
+    _ = ud2;
+
+    const req: *DeviceReq = @ptrCast(@alignCast(ud1));
+    req.device = device;
+    req.done = true;
 }
