@@ -94,13 +94,17 @@ pub fn main(init: std.process.Init) !void {
     const queue = wgpu.wgpuDeviceGetQueue(device);
     defer wgpu.wgpuQueueRelease(queue);
 
+    var fb_w: c_int = 0;
+    var fb_h: c_int = 0;
+
+    glfw.glfwGetFramebufferSize(window, &fb_w, &fb_h);
+
     const config = wgpu.WGPUSurfaceConfiguration{
         .device = device,
         .format = @intCast(wgpu.WGPUTextureFormat_BGRA8Unorm),
-        // Already WGPUTextureUsage-typed
         .usage = wgpu.WGPUTextureUsage_RenderAttachment,
-        .width = 1024,
-        .height = 768,
+        .width = @intCast(fb_w),
+        .height = @intCast(fb_h),
         .presentMode = @intCast(wgpu.WGPUPresentMode_Fifo),
         .alphaMode = @intCast(wgpu.WGPUCompositeAlphaMode_Auto),
     };
@@ -181,6 +185,9 @@ pub fn main(init: std.process.Init) !void {
     // whenever a frame arrives. The main thread stays parked in glfwWaitEvents().
     const ipc = try std.Thread.spawn(.{}, controlLoop, .{ control, init.io });
 
+    // First frame, so the window shows immediately
+    paintClear(surface, device, queue);
+
     // Wakes on OS events and on FrameReady (posted by the IPC thread).
     // On each wake, drain whatever the renderer published - a no-op if the ring is empty
     while (glfw.glfwWindowShouldClose(window) == glfw.GLFW_FALSE) {
@@ -206,6 +213,9 @@ pub fn main(init: std.process.Init) !void {
 
             rd.commit();
         }
+
+        // Repaint each wake
+        paintClear(surface, device, queue);
     }
 
     // Window closing: unblock the IPC thread's blocking read, then join it.
@@ -287,4 +297,45 @@ fn onDevice(status: wgpu.WGPURequestDeviceStatus, device: wgpu.WGPUDevice, messa
     const req: *DeviceReq = @ptrCast(@alignCast(ud1));
     req.device = device;
     req.done = true;
+}
+
+fn paintClear(surface: wgpu.WGPUSurface, device: wgpu.WGPUDevice, queue: wgpu.WGPUQueue) void {
+    var st: wgpu.WGPUSurfaceTexture = undefined;
+
+    wgpu.wgpuSurfaceGetCurrentTexture(surface, &st);
+
+    const texture = st.texture orelse return;
+    defer wgpu.wgpuTextureRelease(texture);
+
+    const view = wgpu.wgpuTextureCreateView(texture, null) orelse return;
+    defer wgpu.wgpuTextureViewRelease(view);
+
+    const encoder = wgpu.wgpuDeviceCreateCommandEncoder(device, null) orelse return;
+    defer wgpu.wgpuCommandEncoderRelease(encoder);
+
+    const color = wgpu.WGPURenderPassColorAttachment{
+        .view = view,
+        // REQUIRED for a 2D attachment
+        .depthSlice = @intCast(wgpu.WGPU_DEPTH_SLICE_UNDEFINED),
+        .loadOp = @intCast(wgpu.WGPULoadOp_Clear),
+        .storeOp = @intCast(wgpu.WGPUStoreOp_Store),
+        // Dark slate
+        .clearValue = .{ .r = 0.05, .g = 0.06, .b = 0.09, .a = 1.0 },
+    };
+
+    const pass_desc = wgpu.WGPURenderPassDescriptor{
+        .colorAttachmentCount = 1,
+        .colorAttachments = &color,
+    };
+
+    const pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc) orelse return;
+    wgpu.wgpuRenderPassEncoderEnd(pass);
+
+    const cmd = wgpu.wgpuCommandEncoderFinish(encoder, null) orelse return;
+    defer wgpu.wgpuCommandBufferRelease(cmd);
+
+    const cmds = [_]wgpu.WGPUCommandBuffer{cmd};
+    wgpu.wgpuQueueSubmit(queue, cmds.len, &cmds);
+
+    _ = wgpu.wgpuSurfacePresent(surface);
 }
