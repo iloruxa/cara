@@ -252,7 +252,7 @@ pub const Gpu = struct {
         errdefer wgpu.wgpuTextureViewRelease(id_view);
 
         const rb_desc = wgpu.WGPUBufferDescriptor{
-            .usage = wgpu.WGPUBufferUsage_MapRead,
+            .usage = wgpu.WGPUBufferUsage_MapRead | wgpu.WGPUBufferUsage_CopyDst,
             .size = 256,
         };
         const readback = wgpu.wgpuDeviceCreateBuffer(device, &rb_desc) orelse return error.Readback;

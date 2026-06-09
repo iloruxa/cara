@@ -6,6 +6,19 @@ const std = @import("std");
 // Dependent imports
 const net = std.Io.net;
 
+fn readExact(stream: std.Io.net.Stream, io: std.Io, dst: []u8) !void {
+    var got: usize = 0;
+
+    while (got < dst.len) {
+        var bufs: [1][]u8 = .{dst[got..]};
+        const n = try stream.read(io, &bufs);
+
+        if (n == 0) return error.ChannelClosed;
+
+        got += n;
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Cara renderer started\n", .{});
 
@@ -73,6 +86,28 @@ pub fn main(init: std.process.Init) !void {
     w.commit();
 
     std.debug.print("RENDERER: committed frame ({d}-byte DrawRect), head now {d}\n", .{ @sizeOf(draw.DrawRect), header.head });
+
+    // --- Receive control messages from the host until it closes the channel ---
+    std.debug.print("RENDERER: listening for input\n", .{});
+
+    while (true) {
+        var hdr: protocol.MsgHeader = undefined;
+
+        readExact(control, init.io, std.mem.asBytes(&hdr)) catch break;
+
+        switch (@as(protocol.MsgKind, @enumFromInt(hdr.kind))) {
+            .input_event => {
+                var ev: protocol.InputEvent = undefined;
+                readExact(control, init.io, std.mem.asBytes(&ev)) catch break;
+
+                std.debug.print("RENDERER: InputEventt kind={d} at ({d},{d})entity={d}\n", .{ ev.kind, ev.x, ev.y, ev.entity });
+            },
+            else => {
+                std.debug.print("RENDERER: unexpected message kind={d} len={d}\n", .{ hdr.kind, hdr.len });
+                break;
+            },
+        }
+    }
 
     // Signal the host that a frame is ready
     const frame_ready = protocol.MsgHeader{ .kind = @intFromEnum(protocol.MsgKind.frame_ready), .len = 0 };

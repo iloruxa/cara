@@ -24,8 +24,11 @@ pub const MsgKind = enum(u32) {
     // host -> renderer: the frame was presented
     frame_done,
 
+    // host -> renderer: an input, hit entity pre-resolved
+    input_event,
+
     // LoadPage, Fetch, FetchResult, StorageOp, StorageResult,
-    // InputEvent, A11yUpdate, Resize, SpawnRenderer, ProcessHealthCheck
+    // A11yUpdate, Resize, SpawnRenderer, ProcessHealthCheck
     // Add as needed
     _,
 };
@@ -43,6 +46,27 @@ pub const MsgHeader = extern struct {
 };
 
 pub const msg_header_size = @sizeOf(MsgHeader); // == 8
+
+pub const InputKind = enum(u32) {
+    mouse_down = 1,
+    _,
+};
+
+/// Carried as the payload after a MsgHeader{ .kind = input_event }
+pub const InputEvent = extern struct {
+    // an InputKind
+    kind: u32,
+
+    // bitfield (unused for now)
+    modifiers: u32,
+
+    // framebuffer-pixel coordinates
+    x: f32,
+    y: f32,
+
+    // host-resolved hit entity (0 = background)
+    entity: u32,
+};
 
 comptime {
     std.debug.assert(msg_header_size == 8);

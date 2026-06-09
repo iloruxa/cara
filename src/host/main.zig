@@ -6,13 +6,19 @@ const std = @import("std");
 const net = std.Io.net;
 const Gpu = @import("gpu.zig").Gpu;
 
-// --- Input: on left-click, hit-test the cursor against the ID buffer ---
+const ClickCtx = struct {
+    gpu: *Gpu,
+    control: net.Stream,
+    io: std.Io,
+};
+
+// --- Input: left-click -> hit-test -> send InputEvent to the renderer ---
 fn onMouseButton(window: ?*glfw.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.c) void {
     _ = mods;
 
     if (button != glfw.GLFW_MOUSE_BUTTON_LEFT or action != glfw.GLFW_PRESS) return;
 
-    const g: *Gpu = @ptrCast(@alignCast(glfw.glfwGetWindowUserPointer(window)));
+    const ctx: *ClickCtx = @ptrCast(@alignCast(glfw.glfwGetWindowUserPointer(window)));
 
     var cx: f64 = 0;
     var cy: f64 = 0;
@@ -36,9 +42,30 @@ fn onMouseButton(window: ?*glfw.GLFWwindow, button: c_int, action: c_int, mods: 
 
     if (px >= @as(u32, @intCast(fw)) or py >= @as(u32, @intCast(fh))) return;
 
-    const id = g.hitTest(px, py);
+    const entity = ctx.gpu.hitTest(px, py);
 
-    std.debug.print("HOST: click ({d},{d}) -> entity {d}\n", .{ px, py, id });
+    std.debug.print("HOST: click ({d},{d}) -> entity {d}\n", .{ px, py, entity });
+
+    // dispatch to the renderer
+    const ev = protocol.InputEvent{
+        .kind = @intFromEnum(protocol.InputKind.mouse_down),
+        .modifiers = 0,
+        .x = @floatFromInt(px),
+        .y = @floatFromInt(py),
+        .entity = entity,
+    };
+
+    const hdr = protocol.MsgHeader{
+        .kind = @intFromEnum(protocol.MsgKind.input_event),
+        .len = @sizeOf(protocol.InputEvent),
+    };
+
+    var buf: [64]u8 = undefined;
+    var cw = ctx.control.writer(ctx.io, &buf);
+
+    cw.interface.writeAll(std.mem.asBytes(&hdr)) catch return;
+    cw.interface.writeAll(std.mem.asBytes(&ev)) catch return;
+    cw.interface.flush() catch return;
 }
 
 // --- IPC Thread: wake the GLFW loop on each FrameReady ---
@@ -90,9 +117,6 @@ pub fn main(init: std.process.Init) !void {
     // --- GPU: surface + device + pipelin ---
     var gpu = try Gpu.init(window);
     defer gpu.deinit();
-
-    glfw.glfwSetWindowUserPointer(window, &gpu);
-    _ = glfw.glfwSetMouseButtonCallback(window, &onMouseButton);
 
     // --- Shared memory ring region ---
     var name_buf: [64]u8 = undefined;
@@ -149,6 +173,11 @@ pub fn main(init: std.process.Init) !void {
     // Block until the renderer connects back on the control channel.
     const control = try server.accept(init.io);
     defer control.close(init.io);
+
+    var click_ctx = ClickCtx{ .gpu = &gpu, .control = control, .io = init.io };
+
+    glfw.glfwSetWindowUserPointer(window, &click_ctx);
+    _ = glfw.glfwSetMouseButtonCallback(window, &onMouseButton);
 
     std.debug.print("HOST: control channel connected\n", .{});
 
