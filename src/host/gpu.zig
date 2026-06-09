@@ -364,7 +364,7 @@ pub const Gpu = struct {
         const src = wgpu.WGPUTexelCopyTextureInfo{
             .texture = self.id_texture,
             .origin = .{ .x = x, .y = y, .z = 0 },
-            .aspect = @intFromFloat(wgpu.WGPUTextureAspect_All),
+            .aspect = @intCast(wgpu.WGPUTextureAspect_All),
         };
 
         const dst = wgpu.WGPUTexelCopyBufferInfo{
