@@ -59,8 +59,12 @@ const rect_wgsl =
     \\    );
     \\    return vec4<f32>(p[i], 0.0, 1.0);
     \\}
-    \\@fragment fn fs() -> @location(0) vec4<f32> {
-    \\    return u_color;
+    \\struct FsOut {
+    \\    @location(0) color: vec4<f32>,
+    \\    @location(1) id: u32,
+    \\}
+    \\@fragment fn fs() -> FsOut {
+    \\    return FsOut(u_color, 1u); // entity id 1 (the single rect); background = 0
     \\}
 ;
 
@@ -86,16 +90,16 @@ fn createRectPainter(device: wgpu.WGPUDevice) ?RectPainter {
     const module = wgpu.wgpuDeviceCreateShaderModule(device, &sm_desc) orelse return null;
     defer wgpu.wgpuShaderModuleRelease(module);
 
-    const color_target = wgpu.WGPUColorTargetState{
-        .format = @intCast(wgpu.WGPUTextureFormat_BGRA8Unorm),
-        .writeMask = wgpu.WGPUColorWriteMask_All,
+    const targets = [_]wgpu.WGPUColorTargetState{
+        .{ .format = @intCast(wgpu.WGPUTextureFormat_BGRA8Unorm), .writeMask = wgpu.WGPUColorWriteMask_All },
+        .{ .format = @intCast(wgpu.WGPUTextureFormat_R32Uint), .writeMask = wgpu.WGPUColorWriteMask_All },
     };
 
     const fragment = wgpu.WGPUFragmentState{
         .module = module,
         .entryPoint = sv("fs"),
-        .targetCount = 1,
-        .targets = &color_target,
+        .targetCount = 2,
+        .targets = &targets,
     };
 
     const desc = wgpu.WGPURenderPipelineDescriptor{
@@ -144,6 +148,8 @@ pub const Gpu = struct {
     device: wgpu.WGPUDevice,
     queue: wgpu.WGPUQueue,
     painter: RectPainter,
+    id_texture: wgpu.WGPUTexture,
+    id_view: wgpu.WGPUTextureView,
 
     pub const Error = error{
         Instance,
@@ -153,6 +159,7 @@ pub const Gpu = struct {
         Adapter,
         Device,
         Pipeline,
+        IdTexture,
     };
 
     pub fn init(window: *glfw.GLFWwindow) Error!Gpu {
@@ -165,6 +172,7 @@ pub const Gpu = struct {
             .chain = .{ .sType = @intCast(wgpu.WGPUSType_SurfaceSourceMetalLayer) },
             .layer = metal_layer,
         };
+
         const surface_desc = wgpu.WGPUSurfaceDescriptor{
             .nextInChain = &metal_source.chain,
         };
@@ -203,8 +211,12 @@ pub const Gpu = struct {
         errdefer wgpu.wgpuQueueRelease(queue);
 
         const painter = createRectPainter(device) orelse return error.Pipeline;
+        errdefer {
+            wgpu.wgpuBindGroupRelease(painter.bind_group);
+            wgpu.wgpuBufferRelease(painter.buffer);
+            wgpu.wgpuRenderPipelineRelease(painter.pipeline);
+        }
 
-        // Configure the surface to the framebuffer size (Retina-correct)
         var fb_w: c_int = 0;
         var fb_h: c_int = 0;
 
@@ -221,12 +233,39 @@ pub const Gpu = struct {
         };
         wgpu.wgpuSurfaceConfigure(surface, &config);
 
-        std.debug.print("HOST: gpu ready ({d}x{d})\n", .{ fb_w, fb_h });
+        // Parallel ID buffer: one entity id per pixel, read on input
+        const id_desc = wgpu.WGPUTextureDescriptor{
+            .usage = wgpu.WGPUTextureUsage_RenderAttachment | wgpu.WGPUTextureUsage_CopySrc,
+            .dimension = @intCast(wgpu.WGPUTextureDimension_2D),
+            .size = .{ .width = @intCast(fb_w), .height = @intCast(fb_h), .depthOrArrayLayers = 1 },
+            .format = @intCast(wgpu.WGPUTextureFormat_R32Uint),
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+        };
+        const id_texture = wgpu.wgpuDeviceCreateTexture(device, &id_desc) orelse return error.IdTexture;
+        errdefer wgpu.wgpuTextureRelease(id_texture);
 
-        return .{ .instance = instance, .surface = surface, .adapter = adapter, .device = device, .queue = queue, .painter = painter };
+        const id_view = wgpu.wgpuTextureCreateView(id_texture, null) orelse return error.IdTexture;
+        errdefer wgpu.wgpuTextureViewRelease(id_view);
+
+        std.debug.print("HOST: gpu ready ({d}x{d}, +id buffer)\n", .{ fb_w, fb_h });
+
+        return .{
+            .instance = instance,
+            .surface = surface,
+            .adapter = adapter,
+            .device = device,
+            .queue = queue,
+            .painter = painter,
+            .id_texture = id_texture,
+            .id_view = id_view,
+        };
     }
 
     pub fn deinit(self: *Gpu) void {
+        wgpu.wgpuTextureViewRelease(self.id_view);
+        wgpu.wgpuTextureRelease(self.id_texture);
+
         wgpu.wgpuBindGroupRelease(self.painter.bind_group);
         wgpu.wgpuBufferRelease(self.painter.buffer);
         wgpu.wgpuRenderPipelineRelease(self.painter.pipeline);
@@ -252,14 +291,31 @@ pub const Gpu = struct {
         const encoder = wgpu.wgpuDeviceCreateCommandEncoder(self.device, null) orelse return;
         defer wgpu.wgpuCommandEncoderRelease(encoder);
 
-        const color = wgpu.WGPURenderPassColorAttachment{
-            .view = view,
-            .depthSlice = @intCast(wgpu.WGPU_DEPTH_SLICE_UNDEFINED),
-            .loadOp = @intCast(wgpu.WGPULoadOp_Clear),
-            .storeOp = @intCast(wgpu.WGPUStoreOp_Store),
+        const attachments = [_]wgpu.WGPURenderPassColorAttachment{
+            .{
+                // 0: visible color (the surface)
+                .view = view,
+                .depthSlice = @intCast(wgpu.WGPU_DEPTH_SLICE_UNDEFINED),
+                .loadOp = @intCast(wgpu.WGPULoadOp_Clear),
+                .storeOp = @intCast(wgpu.WGPUStoreOp_Store),
+                .clearValue = .{
+                    .r = 0,
+                    .g = 0,
+                    .b = 0,
+                    .a = 0,
+                },
+            },
+            .{
+                // 1: entity id (R32Uint), cleared to 0 = "no entity"
+                .view = self.id_view,
+                .depthSlice = @intCast(wgpu.WGPU_DEPTH_SLICE_UNDEFINED),
+                .loadOp = @intCast(wgpu.WGPULoadOp_Clear),
+                .storeOp = @intCast(wgpu.WGPUStoreOp_Store),
+                .clearValue = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
+            },
         };
 
-        const pass_desc = wgpu.WGPURenderPassDescriptor{ .colorAttachmentCount = 1, .colorAttachments = &color };
+        const pass_desc = wgpu.WGPURenderPassDescriptor{ .colorAttachmentCount = 2, .colorAttachments = &attachments };
         const pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc) orelse return;
 
         if (rect) |rr| {
