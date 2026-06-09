@@ -49,6 +49,17 @@ fn onDevice(status: wgpu.WGPURequestDeviceStatus, device: wgpu.WGPUDevice, messa
     req.done = true;
 }
 
+const MapState = struct { done: bool = false };
+
+fn onMap(status: wgpu.WGPUMapAsyncStatus, message: wgpu.WGPUStringView, ud1: ?*anyopaque, ud2: ?*anyopaque) callconv(.c) void {
+    _ = status;
+    _ = message;
+    _ = ud2;
+
+    const s: *MapState = @ptrCast(@alignCast(ud1));
+    s.done = true;
+}
+
 // --- GPU: rectangle pipeline ---
 // Multi-line string
 const rect_wgsl =
@@ -150,17 +161,9 @@ pub const Gpu = struct {
     painter: RectPainter,
     id_texture: wgpu.WGPUTexture,
     id_view: wgpu.WGPUTextureView,
+    readback: wgpu.WGPUBuffer,
 
-    pub const Error = error{
-        Instance,
-        NoCocoaWindow,
-        NoMetalLayer,
-        Surface,
-        Adapter,
-        Device,
-        Pipeline,
-        IdTexture,
-    };
+    pub const Error = error{ Instance, NoCocoaWindow, NoMetalLayer, Surface, Adapter, Device, Pipeline, IdTexture, Readback };
 
     pub fn init(window: *glfw.GLFWwindow) Error!Gpu {
         const instance = wgpu.wgpuCreateInstance(null) orelse return error.Instance;
@@ -248,6 +251,13 @@ pub const Gpu = struct {
         const id_view = wgpu.wgpuTextureCreateView(id_texture, null) orelse return error.IdTexture;
         errdefer wgpu.wgpuTextureViewRelease(id_view);
 
+        const rb_desc = wgpu.WGPUBufferDescriptor{
+            .usage = wgpu.WGPUBufferUsage_MapRead,
+            .size = 256,
+        };
+        const readback = wgpu.wgpuDeviceCreateBuffer(device, &rb_desc) orelse return error.Readback;
+        errdefer wgpu.wgpuBufferRelease(readback);
+
         std.debug.print("HOST: gpu ready ({d}x{d}, +id buffer)\n", .{ fb_w, fb_h });
 
         return .{
@@ -259,22 +269,22 @@ pub const Gpu = struct {
             .painter = painter,
             .id_texture = id_texture,
             .id_view = id_view,
+            .readback = readback,
         };
     }
 
     pub fn deinit(self: *Gpu) void {
         wgpu.wgpuTextureViewRelease(self.id_view);
         wgpu.wgpuTextureRelease(self.id_texture);
-
         wgpu.wgpuBindGroupRelease(self.painter.bind_group);
         wgpu.wgpuBufferRelease(self.painter.buffer);
         wgpu.wgpuRenderPipelineRelease(self.painter.pipeline);
-
         wgpu.wgpuQueueRelease(self.queue);
         wgpu.wgpuDeviceRelease(self.device);
         wgpu.wgpuAdapterRelease(self.adapter);
         wgpu.wgpuSurfaceRelease(self.surface);
         wgpu.wgpuInstanceRelease(self.instance);
+        wgpu.wgpuBufferRelease(self.readback);
     }
 
     // --- per-frame paint: clear, then the rect (scissor-clipped) ---
@@ -345,5 +355,45 @@ pub const Gpu = struct {
         const cmds = [_]wgpu.WGPUCommandBuffer{cmd};
         wgpu.wgpuQueueSubmit(self.queue, cmds.len, &cmds);
         _ = wgpu.wgpuSurfacePresent(self.surface);
+    }
+
+    pub fn hitTest(self: *Gpu, x: u32, y: u32) u32 {
+        const encoder = wgpu.wgpuDeviceCreateCommandEncoder(self.device, null) orelse return 0;
+        defer wgpu.wgpuCommandEncoderRelease(encoder);
+
+        const src = wgpu.WGPUTexelCopyTextureInfo{
+            .texture = self.id_texture,
+            .origin = .{ .x = x, .y = y, .z = 0 },
+            .aspect = @intFromFloat(wgpu.WGPUTextureAspect_All),
+        };
+
+        const dst = wgpu.WGPUTexelCopyBufferInfo{
+            .layout = .{ .offset = 0, .bytesPerRow = 256, .rowsPerImage = 1 },
+            .buffer = self.readback,
+        };
+
+        const extent = wgpu.WGPUExtent3D{ .width = 1, .height = 1, .depthOrArrayLayers = 1 };
+        wgpu.wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &extent);
+
+        const cmd = wgpu.wgpuCommandEncoderFinish(encoder, null) orelse return 0;
+        defer wgpu.wgpuCommandBufferRelease(cmd);
+
+        const cmds = [_]wgpu.WGPUCommandBuffer{cmd};
+        wgpu.wgpuQueueSubmit(self.queue, cmds.len, &cmds);
+
+        var state = MapState{};
+        _ = wgpu.wgpuBufferMapAsync(self.readback, wgpu.WGPUMapMode_Read, 0, 256, .{
+            .mode = @intCast(wgpu.WGPUCallbackMode_AllowProcessEvents),
+            .callback = &onMap,
+            .userdata1 = &state,
+        });
+
+        while (!state.done) _ = wgpu.wgpuDevicePoll(self.device, 1, null);
+
+        const ptr = wgpu.wgpuBufferGetConstMappedRange(self.readback, 0, 4) orelse return 0;
+        const id = @as(*const u32, @ptrCast(@alignCast(ptr))).*;
+        wgpu.wgpuBufferUnmap(self.readback);
+
+        return id;
     }
 };

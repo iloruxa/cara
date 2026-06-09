@@ -6,6 +6,41 @@ const std = @import("std");
 const net = std.Io.net;
 const Gpu = @import("gpu.zig").Gpu;
 
+// --- Input: on left-click, hit-test the cursor against the ID buffer ---
+fn onMouseButton(window: ?*glfw.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.c) void {
+    _ = mods;
+
+    if (button != glfw.GLFW_MOUSE_BUTTON_LEFT or action != glfw.GLFW_PRESS) return;
+
+    const g: *Gpu = @ptrCast(@alignCast(glfw.glfwGetWindowUserPointer(window)));
+
+    var cx: f64 = 0;
+    var cy: f64 = 0;
+
+    glfw.glfwGetCursorPos(window, &cx, &cy);
+
+    if (cx < 0 or cy < 0) return;
+
+    var ww: c_int = 0;
+    var wh: c_int = 0;
+
+    glfw.glfwGetWindowSize(window, &ww, &wh);
+
+    var fw: c_int = 0;
+    var fh: c_int = 0;
+
+    glfw.glfwGetFramebufferSize(window, &fw, &fh);
+
+    const px: u32 = @intFromFloat(cx * @as(f64, @floatFromInt(fw)) / @as(f64, @floatFromInt(ww)));
+    const py: u32 = @intFromFloat(cy * @as(f64, @floatFromInt(fh)) / @as(f64, @floatFromInt(wh)));
+
+    if (px >= @as(u32, @intCast(fw)) or py >= @as(u32, @intCast(fh))) return;
+
+    const id = g.hitTest(px, py);
+
+    std.debug.print("HOST: click ({d},{d}) -> entity {d}\n", .{ px, py, id });
+}
+
 // --- IPC Thread: wake the GLFW loop on each FrameReady ---
 fn controlLoop(control: std.Io.net.Stream, io: std.Io) void {
     while (true) {
@@ -55,6 +90,9 @@ pub fn main(init: std.process.Init) !void {
     // --- GPU: surface + device + pipelin ---
     var gpu = try Gpu.init(window);
     defer gpu.deinit();
+
+    glfw.glfwSetWindowUserPointer(window, &gpu);
+    _ = glfw.glfwSetMouseButtonCallback(window, &onMouseButton);
 
     // --- Shared memory ring region ---
     var name_buf: [64]u8 = undefined;
