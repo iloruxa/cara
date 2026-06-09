@@ -65,17 +65,16 @@ pub fn main(init: std.process.Init) !void {
     const fd = std.c.shm_open(shm_name.ptr, @bitCast(oflags), @as(c_uint, 0o600));
 
     if (fd < 0) {
-        const errno_val: c_int = std.c._errno().*;
-        std.debug.print("HOST: shm_open failed, ERRNO:{d}\n", .{errno_val});
+        std.debug.print("HOST: shm_open failed: {s}\n", .{@tagName(std.posix.errno(fd))});
         return error.ShmOpenFailed;
     }
 
     // Teardown on any exit from here - including error returns below.
     defer _ = std.c.shm_unlink(shm_name.ptr);
 
-    if (std.c.ftruncate(fd, ring.region_size) != 0) {
-        const errno_val: c_int = std.c._errno().*;
-        std.debug.print("HOST: ftruncate failed, ERRNO={d}\n", .{errno_val});
+    const trunc = std.c.ftruncate(fd, ring.region_size);
+    if (trunc != 0) {
+        std.debug.print("HOST: ftruncate failed: {s}\n", .{@tagName(std.posix.errno(trunc))});
         return error.FtruncateFailed;
     }
 

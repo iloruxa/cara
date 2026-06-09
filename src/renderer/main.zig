@@ -29,8 +29,7 @@ pub fn main(init: std.process.Init) !void {
     const fd = std.c.shm_open(shm_name.ptr, @bitCast(oflags), @as(c_uint, 0));
 
     if (fd < 0) {
-        const errno_val: c_int = std.c._errno().*;
-        std.debug.print("RENDERER: shm_open({s}) failed, ERRNO={d}\n", .{ shm_name, errno_val });
+        std.debug.print("RENDERER: shm_open({s}) failed: {s}\n", .{ shm_name, @tagName(std.posix.errno(fd)) });
         return error.ShmOpenFailed;
     }
 
