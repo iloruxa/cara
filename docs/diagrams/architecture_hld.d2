@@ -1,153 +1,85 @@
-# ============================================================
-#  Cara — High-Level Architecture
+# Cara — High-Level Architecture (v2, converged)
+# Render:  d2 --layout=elk architecture.d2 architecture.svg
+# Lives at: docs/diagrams/architecture.d2  (rendered .svg next to it)
 #
-#  A from-scratch browser. Two OS processes, one shared-memory
-#  data path, and one IPC control channel. The renderer is
-#  sandboxed and unprivileged; the host owns all OS resources.
-#
-#  Render:   d2 architecture.d2 architecture.svg
-#  Live:     d2 --watch architecture.d2
-# ============================================================
+# Two processes, two channel kinds. Frames are latest-wins; atlas additions
+# are a stream. No pointers across the boundary, no executable memory in the
+# jail, no work while idle. (Full prose: docs/architecture-overview.md)
 
 direction: down
 
-# ---- Shared visual vocabulary --------------------------------
-classes: {
-  rcomp: {
-    style: { fill: "#eef2ff"; stroke: "#4f46e5"; stroke-width: 2; border-radius: 6 }
-  }
-  hcomp: {
-    style: { fill: "#ecfdf5"; stroke: "#059669"; stroke-width: 2; border-radius: 6 }
-  }
-  vendor: {
-    style: { fill: "#f5f5f4"; stroke: "#78716c"; stroke-width: 1; stroke-dash: 3; border-radius: 6 }
-  }
-  chan: {
-    style: { fill: "#ffedd5"; stroke: "#ea580c"; stroke-width: 2; border-radius: 6 }
-  }
+bundle: {
+  shape: document
+  label: ".glyph + .luau bundle"
 }
 
-# ============================================================
-#  RENDERER PROCESS  (one per origin · sandboxed · unprivileged)
-#  No syscalls, no filesystem, no network. Everything it needs
-#  from the outside world crosses the IPC boundary below.
-# ============================================================
-renderer: "RENDERER PROCESS — per origin · sandboxed · unprivileged" {
-  style: { fill: "#fafbff"; stroke: "#4f46e5"; stroke-width: 3; border-radius: 12; font-size: 18 }
+renderer: {
+  label: "RENDERER — sandboxed, per origin, 100% Zig, no PROT_EXEC"
+  style.fill: "#FDF3E7"
 
-  bundle: "Page Bundle — *.glyph + *.lua" { shape: page; class: rcomp }
-  parser: "Glyph Parser — zero-alloc recursive descent" { class: rcomp }
-  lua: "Lua Runtime — LuaJIT, JIT enabled" { class: rcomp }
-  react: "Reactivity — signals · compute · bind · DirtyFlags" { class: rcomp }
-  scene: "Scene Graph — ECS · SoA pools · first-child / next-sibling" { class: rcomp }
+  parser: "Glyph parser — zero-alloc, md desugar"
+  luau: "Luau VM — interpreter-only"
+  react: "Reactivity — signals set DirtyFlags"
+  scene: "Scene graph ECS — generational u32"
+  systems: "Style · Strict-Box layout · Paint"
+  trinity: "Text Trinity + atlas layout"
+  imgdec: "Image decode (jailed)"
+  producer: "Frame producer — full list + damage"
 
-  systems: "Systems" {
-    style: { fill: "#eef2ff"; stroke: "#4f46e5"; border-radius: 6 }
-    sty: "Style" { class: rcomp }
-    lay: "Strict-Box Layout — constraints down, sizes up" { class: rcomp }
-    pnt: "Paint" { class: rcomp }
-    acc: "A11y projection (AccessKit-shaped)" { class: rcomp }
-  }
-
-  text: "Text Trinity" {
-    style: { fill: "#eef2ff"; stroke: "#4f46e5"; border-radius: 6 }
-    bidi: "SheenBidi — bidi (UAX 9)" { class: vendor }
-    brk: "libunibreak — line breaking (UAX 14)" { class: vendor }
-    shp: "HarfBuzz — shaping" { class: vendor }
-    ras: "FreeType — rasterization" { class: vendor }
-  }
-
-  dlw: "Display List Writer" { class: rcomp }
-
-  # internal pipeline
-  bundle -> parser
-  parser -> scene
-  lua -> react
-  react -> scene
-  scene -> systems
-  systems -> text
-  systems -> dlw
+  parser -> scene: build
+  luau -> react
+  react -> scene: "the render gate"
+  scene -> systems: "dirty only"
+  systems -> trinity: "measure / shape"
+  trinity -> producer: "glyph runs (DrawTextRun)"
+  systems -> producer: "draw commands"
 }
 
-# ============================================================
-#  THE BOUNDARY  (security + performance + conceptual split)
-#  Everything large flows through shared memory; everything
-#  controlling flows through IPC. There is no third channel.
-# ============================================================
-channels: "PROCESS BOUNDARY" {
-  style: { fill: "#fff7ed"; stroke: "#ea580c"; stroke-width: 3; border-radius: 12; font-size: 18 }
+shm: {
+  label: "SHARED MEMORY — host-created, fd passed once (SCM_RIGHTS)"
+  style.fill: "#EAF2FB"
 
-  ring: "Shared Memory — display-list ring · Release/Acquire on head" {
-    shape: queue
-    class: chan
-  }
-  ipc: "IPC Control Channel — small typed messages (Unix socket)" {
-    class: chan
-  }
+  slots: "3 frame slots — latest-wins (latest: slot·dirty·gen)"
+  atlas: "atlas stream — exactly-once (head/tail, capacity ≥ 1 frame)"
+  staging: "image staging — idempotent, grow-only"
 }
 
-# ============================================================
-#  HOST PROCESS  (privileged · owns window, GPU, net, storage)
-# ============================================================
-host: "HOST PROCESS — privileged · owns OS resources" {
-  style: { fill: "#f7fefb"; stroke: "#059669"; stroke-width: 3; border-radius: 12; font-size: 18 }
+host: {
+  label: "HOST — privileged, 100% Zig"
+  style.fill: "#EDF7EC"
 
-  win: "Window + OS Event Pump" { class: hcomp }
-  spawn: "Process Spawner" { class: hcomp }
-  exec: "Display List Executor" { class: hcomp }
-  gpu: "GPU — render backend · color framebuffer · ID buffer" { class: hcomp }
-  hit: "Hit-Test — reads one ID-buffer pixel" { class: hcomp }
-  net: "Net — libcurl · HTTP/2 · TLS 1.3" { class: hcomp }
-  store: "Storage — per-origin SQLite KV" { shape: cylinder; class: hcomp }
-  clip: "Clipboard" { class: hcomp }
-  a11ybridge: "AccessKit Platform Bridge" { class: hcomp }
+  ipcThread: "IPC thread (kqueue / epoll)"
+  exec: "Frame executor — check-then-exchange"
+  gpu: "gpu.zig seam ⚑ — hand-rolled vs wgpu-native"
+  hittest: "ID-buffer hit-test — O(1), generational handle"
+  window: "Window + event pump (glfw)"
+  services: "net · storage · clipboard · a11y"
+  spawn: "Spawner — Linux zygote, macOS posix_spawn"
 
-  # internal flow
-  exec -> gpu
-  win -> hit
-  hit -> gpu
-  gpu -> a11ybridge
+  ipcThread -> exec: wake
+  exec -> gpu: "encode — damage at age 1, else full"
+  window -> hittest: "(x, y)"
 }
 
-# ============================================================
-#  CROSS-BOUNDARY FLOWS
-# ============================================================
+osgpu: "OS · GPU · Network · Disk"
 
-# --- Bulk data path: renderer produces, host consumes (the ring) ---
-renderer.dlw -> channels.ring: display list — Release store on head
-channels.ring -> host.exec: Acquire load on head
+# ---- page load ----
+bundle -> renderer.parser: "LoadPage (the host fetched it)"
 
-# --- Lifecycle: host spawns and feeds the renderer ---
-host.spawn -> renderer: SpawnRenderer + LoadPage (bundle over IPC)
+# ---- bulk data: shared memory ----
+renderer.producer -> shm.slots: "publish — release-exchange"
+shm.slots -> host.exec: "take newest — check, then exchange"
+renderer.trinity -> shm.atlas: "append bitmaps"
+shm.atlas -> host.exec: "drain to head (tail = ack)"
+renderer.imgdec -> shm.staging: "pixels, written once"
+shm.staging -> host.gpu: "upload by resource_id → UploadDone"
 
-# --- Frame handshake ---
-renderer -> channels.ipc: FrameReady (offset, length)
-channels.ipc -> renderer: FrameDone · Resize
+# ---- control: IPC socket, 13 typed messages ----
+renderer.producer -> host.ipcThread: "FrameReady (wants_tick), after publish"
+host.exec -> renderer.react: "FrameTick — only while armed"
+host.hittest -> renderer.react: "InputEvent — handle + frame_seq"
+host.services <-> renderer.luau: "Fetch · Storage"
+host.spawn -> renderer: "shm fds + socket only (CLOEXEC)"
 
-# --- Network: renderer asks, host fetches ---
-renderer.lua -> channels.ipc: Fetch
-channels.ipc -> host.net: Fetch
-host.net -> channels.ipc: FetchResult
-channels.ipc -> renderer.lua: FetchResult · StorageResult
-
-# --- Storage over IPC ---
-renderer.lua -> channels.ipc: StorageOp
-channels.ipc -> host.store: StorageOp
-
-# --- Input: host hit-tests, sends resolved entity to renderer ---
-host.hit -> channels.ipc: InputEvent (hit entity resolved)
-channels.ipc -> renderer.scene: InputEvent
-
-# --- Accessibility projection ---
-renderer.systems -> channels.ipc: A11yUpdate
-channels.ipc -> host.a11ybridge: A11yUpdate
-
-# ============================================================
-#  LEGEND — the 12 IPC control-message types
-# ============================================================
-legend: |md
-  ### IPC control messages (v1)
-  `LoadPage` · `Fetch` · `FetchResult` · `StorageOp` · `StorageResult` · `InputEvent`
-  `FrameReady` · `FrameDone` · `A11yUpdate` · `Resize` · `SpawnRenderer` · `ProcessHealthcheck`
-|
-legend.near: bottom-center
+# ---- the metal ----
+host.gpu -> osgpu: "Metal (CAMetalLayer) / Vulkan (Wayland)"

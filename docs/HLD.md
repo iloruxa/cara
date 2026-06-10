@@ -1,162 +1,167 @@
-# Cara — Architecture Overview
+# Cara — High-Level Design
 
-A from-scratch browser built on a **two-process design**: a privileged **host**
-and a sandboxed **renderer**, talking over exactly two channels — a
-**shared-memory ring** for bulk data and an **IPC control channel** for small
-messages.
+*The five-minute orientation. The full specification is [`ARCHITECTURE.md`](ARCHITECTURE.md),
+which governs wherever the two disagree. Diagram source: `diagrams/architecture.d2`.*
 
-> High-level map only. Full spec (Glyph grammar, utility vocabulary, layout
-> algorithm) lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+![Cara high-level architecture](diagrams/architecture.svg)
 
 ---
 
-## The flow, top to bottom
+## The idea
 
-Data flows **down**: the renderer produces a display list; the host consumes it
-and paints the screen. Control and input flow back **up** through IPC.
+Cara is a from-scratch browser in **Zig** that does not render the web. Pages are
+declared in **Glyph** (a four-rule markup language), styled with a locked
+~220-utility vocabulary, scripted in **Luau**, laid out by single-pass constraint
+propagation, and painted through a data-oriented scene graph. Two constraints
+outrank everything: anything more complex than strictly necessary gets cut, and
+**idle costs nothing** — a browser nobody is looking at should be
+indistinguishable from one that is not running.
 
-```
-  RENDERER PROCESS                         sandboxed · one per origin
-  -------------------------------------------------------------------
-      Page bundle  (.glyph + .lua)
-            |
-            v
-      Glyph Parser
-            |
-            v
-      Scene Graph (ECS)        <--  driven by Lua (LuaJIT) + Reactivity
-            |
-            v
-      Systems:  Style -> Layout -> Paint -> A11y
-            |
-            v
-      Text Trinity  (SheenBidi, libunibreak, HarfBuzz, FreeType)
-            |
-            v
-      Display List Writer
-            |
-  ====================  WRITE: Release store on head  ================
-            |
-            v
-      SHARED MEMORY  :  display-list ring buffer   (bulk, per-frame)
-      IPC CHANNEL    :  small typed control messages
-            |
-  ====================  READ: Acquire load on head  =================
-            |
-            v
-      Display List Executor
-            |
-            v
-      GPU  (color framebuffer + ID buffer)
-            |
-            v
-      Window  ->  screen
-  -------------------------------------------------------------------
-  HOST PROCESS                             privileged · owns the OS
-```
+## The shape — two processes, two channel kinds
 
-The host also owns the OS event pump, hit-testing, the process spawner,
-networking, storage, clipboard, and the accessibility bridge — all reachable by
-the renderer only through IPC.
+A privileged **host** owns the OS: window, event pump, GPU device, network,
+storage, clipboard, accessibility, hit-testing, and the spawner. A sandboxed
+**renderer** (one per origin) owns the page: parsing, scene graph, style,
+layout, paint, text shaping and rasterization, image decoding, and the Luau VM.
+Bulk data crosses **shared memory**; control crosses a **Unix-socket IPC
+channel**. There is no third boundary, and no pointer ever crosses either one.
 
----
+## The transports
 
-## Why two processes
+| Transport | Semantics | Synchronization | Why this shape |
+|---|---|---|---|
+| **3 frame slots** | latest-wins, skippable | one packed word `latest` (slot, dirty, gen); producer release-exchanges, consumer **checks then** exchanges | frames are replace-semantics; a slow host paints only the newest and never walks a stale frame |
+| **Atlas stream** | exactly-once, ordered | monotonic `atlas_head` / `atlas_tail` cursors, Release/Acquire, wrapping `-%`, capacity ≥ one frame's additions | a skipped frame must never drop a glyph bitmap — the one flow in the system that is genuinely a stream |
+| **Image staging** | idempotent | `(resource_id, offset, size)` references repeat until `UploadDone` | decode stays jailed; re-references make frame-skipping safe |
+| **IPC socket** | 13 typed messages | length-prefixed envelope; doubles as the signaling layer (kqueue/epoll) | portable on both targets; one signal per frame needs no futex |
 
-| Boundary | What it buys |
-|---|---|
-| **Security** | A renderer compromise yields a sandboxed process with no filesystem, no network, no syscalls — only the typed IPC surface. Different origins get different renderers with no shared memory between them. |
-| **Performance** | Per-frame display lists never cross IPC or get copied; they live in shared memory mapped into both processes. |
-| **Conceptual** | Large data goes through shared memory. Control goes through IPC. There is no third channel. |
+Frame slots start at 256 KiB each (geometry self-describing). The staging
+region is host-created and its fd passed once via `SCM_RIGHTS` — the jailed
+renderer can open nothing, and it keeps that fd so a `Resize` grow is a single
+`mmap`. The region is grow-only; the host `ftruncate`s up **before** sending
+`Resize`.
 
----
-
-## Renderer process
-
-Sandboxed, unprivileged, one per origin. Turns a page bundle into a display list.
-
-| Component | Role |
-|---|---|
-| **Glyph Parser** | Single-pass, zero-allocation recursive-descent parse of `.glyph`. |
-| **Lua Runtime** | LuaJIT (JIT on, safe behind the OS sandbox). Page behavior. |
-| **Reactivity** | `signal` / `compute` / `bind`; mutations set `DirtyFlags`. |
-| **Scene Graph** | ECS — entities are `u32`, hierarchy is first-child / next-sibling, components in dense SoA pools. |
-| **Systems** | Style -> Strict-Box Layout (constraints down, sizes up) -> Paint -> A11y. |
-| **Text Trinity** | SheenBidi (bidi), libunibreak (line break), HarfBuzz (shaping), FreeType (raster). |
-| **Display List Writer** | Serializes paint output into the shared-memory ring. |
-
----
-
-## Host process
-
-Privileged. Owns every OS resource the renderer may not touch.
-
-| Component | Role |
-|---|---|
-| **Window + Event Pump** | OS window and input events. |
-| **Process Spawner** | Launches a renderer per origin. |
-| **Display List Executor** | Reads the ring, submits draw commands to the GPU. |
-| **GPU** | Render backend, color framebuffer, and a parallel **ID buffer** for hit-testing. |
-| **Hit-Test** | Reads one ID-buffer pixel at the event coordinates — O(1), correct under overlap and clipping by construction. |
-| **Net** | libcurl, HTTP/2, TLS 1.3. All network I/O lives here. |
-| **Storage** | Per-origin SQLite key-value store. |
-| **Clipboard** | System clipboard access. |
-| **AccessKit Bridge** | Bridges the projected a11y tree to platform APIs. |
-
----
-
-## The two channels
-
-| Channel | Carries | Ordering rule |
-|---|---|---|
-| **Shared-memory ring** | Display lists — bulk, one per frame | Producer **Release**-stores `head`; consumer **Acquire**-loads it. Never relaxed. |
-| **IPC control channel** | Small typed messages | Sequenced messages over a Unix socket. |
-
-**No pointers cross the boundary.** Draw commands are tagged unions with fixed
-headers and inline data; resources are host-assigned integer IDs; variable data
-is referenced by byte offset relative to the ring base.
-
----
-
-## IPC control messages (v1)
+## The 13 messages
 
 | Message | Direction | Purpose |
 |---|---|---|
-| `SpawnRenderer` | host (internal) | Create a renderer for an origin |
-| `LoadPage` | host -> renderer | Deliver the page bundle |
-| `Fetch` | renderer -> host | Request a network resource |
-| `FetchResult` | host -> renderer | Network response |
-| `StorageOp` | renderer -> host | Key-value read / write |
-| `StorageResult` | host -> renderer | Storage result |
-| `InputEvent` | host -> renderer | Input event, hit entity pre-resolved |
-| `FrameReady` | renderer -> host | Display list ready `(offset, length)` |
-| `FrameDone` | host -> renderer | Frame presented |
-| `A11yUpdate` | renderer -> host | Accessibility tree projection |
-| `Resize` | host -> renderer | Viewport changed |
-| `ProcessHealthcheck` | host <-> renderer | Liveness |
+| `SpawnRenderer` | host internal | bring up a renderer for an origin |
+| `LoadPage` | host → renderer | deliver the page bundle |
+| `Fetch` / `FetchResult` | renderer ↔ host | network resources, incl. raw image bytes |
+| `StorageOp` / `StorageResult` | renderer ↔ host | per-origin SQLite KV |
+| `InputEvent` | host → renderer | input; generational `hit_entity` + `frame_seq` pre-resolved |
+| `FrameReady` | renderer → host | new slot published; carries `wants_tick` |
+| `FrameTick` | host → renderer | vsync, **only while armed**; paces animation |
+| `UploadDone` | host → renderer | image staging consumed, reusable |
+| `A11yUpdate` | renderer → host | AccessKit tree projection |
+| `Resize` | host → renderer | viewport changed (after the staging grow) |
+| `ProcessHealthcheck` | host ↔ renderer | liveness |
+
+## One frame's journey
+
+```
+signal mutates
+  -> a DirtyFlags bit is set (the render gate: no bit, no frame)
+  -> style / layout / shaping rerun for dirty entities only
+  -> new glyph bitmaps append to the atlas stream (head advances)
+  -> paint emits the FULL display list + damage rects into the back slot
+  -> release-exchange of latest, then -- and only then -- FrameReady(wants_tick)
+
+host wakes on FrameReady
+  -> acquire-load latest; proceed only if dirty (coalesced wakeups are normal)
+  -> exchange-take the newest slot; stale frames are skipped, never walked
+  -> drain the atlas stream to head (atlas_head_required is the floor)
+  -> upload any staged images by resource_id
+  -> encode: cull leaf commands against damage at buffer age 1,
+     re-encode the full held slot at age != 1 or unknown
+  -> one render pass: color + ID buffer (generational handles); present
+  -> FrameTick on vsync only while wants_tick is armed; otherwise nobody wakes
+```
+
+Idle is genuinely zero: no frame loop, no timer ticks while clean — 0% CPU,
+0% GPU. The only wakeups are input, armed `FrameTick`, and IPC traffic.
+
+## Ownership map
+
+| Concern | Owner | Note |
+|---|---|---|
+| Window, vsync, present | host | sends `FrameTick` while armed |
+| GPU device, atlas texture, ID buffer | host | behind the `gpu.zig` seam |
+| Hit-testing | host | one ID-buffer pixel = generational entity handle, O(1) |
+| Network, storage, clipboard, a11y bridge | host | renderer reaches them only via IPC |
+| Parsing, scene, style, layout, paint | renderer | DirtyFlags drive all incremental work |
+| Text shaping, rasterization, **atlas layout** | renderer | font parsing jailed; host only mirrors the texture |
+| Image decoding | renderer | decoder jailed; host only uploads |
+| Scripting | renderer | Luau compiled from source in the jail; bytecode never crosses trust |
+
+## Security in one paragraph
+
+The renderer runs with **no executable memory** (Luau is interpreter-only, so
+the sandbox denies `mmap(PROT_EXEC)` outright), under seccomp-BPF on Linux
+(read/write, `recvmsg` for the staging fd, no-exec `mmap`, `futex`,
+`getrandom`, and the small unavoidable tail — `open`/`socket`/`exec` denied)
+and a Seatbelt profile on macOS (deprecated API, treated as defense-in-depth;
+privilege minimization is the real macOS mitigation). `CLOEXEC` everywhere;
+the renderer inherits exactly the shm fds and the socket. A full renderer
+compromise yields a process with no filesystem, no network, no exec, and a
+thirteen-message typed surface.
+
+## Memory in one paragraph
+
+Allocation is architecture: lifetime-keyed arenas (parse / frame / page /
+process / shared), u32 indices never pointers, strings interned once. Fonts
+and Unicode tables are `mmap`'d read-only so the page cache shares them across
+renderers; the zygote fork is **Linux-only** (macOS fork-without-exec is a
+tripwire — `posix_spawn` there); background origins freeze. RSS ceilings are
+asserted in CI — a memory regression fails the build.
+
+## The one open decision ⚑
+
+The GPU backend behind the non-negotiable `gpu.zig` seam: **hand-rolled Metal
++ Vulkan** (zero deps, total control, real Vulkan labor) versus
+**wgpu-native** (one C API, battle-tested correctness, a vendored binary).
+Honest favorite: wgpu-native. Resolved by the Phase-3 spike, whose pass bar is
+swapchain resize + present-sync on Wayland + a non-stalling one-pixel ID
+readback per candidate — not "clear a color." Either way the seam stays, so
+the bet is reversible.
+
+## The invariants that bite (each one is a found bug, pinned)
+
+- **Check, then exchange** — an unconditional exchange on a coalesced
+  `FrameReady` trades the host's only good frame for a stale slot.
+- **Publish strictly before signal** — a `FrameReady` racing its publish is a
+  lost frame.
+- **Bitmaps never ride in frames** — skipped frame, lost bitmap, garbage
+  texels; the atlas stream exists because of this.
+- **Atlas capacity ≥ one frame's additions** — otherwise the first glyph-dense
+  screen deadlocks: tail only advances on consumption, and an unpublished
+  frame can never be consumed.
+- **`ftruncate` before `Resize`, grow-only** — the capacity guarantee must
+  happen-before the message that licenses larger production.
+- **Full display list every produced frame** — the host is stateless; partial
+  frames are a protocol violation.
+- **Damage only at buffer age 1** — otherwise re-encode the full held slot.
+- **Cull leaf commands only** — culling a `Clip` push/pop corrupts everything
+  after it.
+- **The ID buffer stores the generational handle, never the bare index** —
+  `frame_seq` says the frame is old; the generation says *this* entity is
+  dead. Different deaths, different checks.
+
+## Roadmap, one line per phase
+
+1. Frame slots (`ring.zig` → `frame.zig`; cursor pair extracted — it ships again in the atlas stream)
+2. Wire protocols; kill the busy-wait; prove 0% idle
+3. Host renderer; the ⚑ GPU spike; ID buffer; hit-test; resize
+4. Text Trinity; atlas stream; `DrawTextRun`
+5. Renderer brain: ECS, Glyph parser, style, Strict-Box, paint
+6. Luau, reactivity, events, first components
+7. Host services: net, storage, clipboard, AccessKit, image pipeline
+8. Sandbox enforced: no-exec jail, musl-static renderer, per-origin isolation
+9. Memory: mmap'd fonts, RSS budgets in CI, Linux zygote, freeze
+10. Far horizon: multi-tab, animation, HTTP/3, atlas eviction, devtools
 
 ---
 
-## How a page loads
-
-Steps 1–7 run once per load; 8–9 are the steady-state loop.
-
-1. **Fetch** — host negotiates HTTP/2 + TLS, retrieves the bundle.
-2. **Spawn + deliver** — host spawns a renderer, sends the bundle over IPC.
-3. **Parse** — renderer parses `.glyph` in one zero-allocation pass.
-4. **Build** — scene graph constructed, initial `DirtyFlags` set.
-5. **Style** — utility tokens resolved.
-6. **Script** — Lua entry script registers signals, bindings, handlers.
-7. **First frame** — layout -> paint -> display list -> `FrameReady` -> a11y.
-8. **Render** — host Acquire-loads `head`, walks the list, submits to GPU, presents, sends `FrameDone`.
-9. **Input loop** — OS event -> host reads ID-buffer pixel -> `InputEvent` -> renderer dispatches -> signal mutations set `DirtyFlags` -> next frame.
-
----
-
-## The data path, in one line
-
-The single producer to consumer path, synchronized by the Release/Acquire pair
-on `head`, is the spine of the system. Every frame travels it:
-
-`Renderer paints -> Display List Writer -> [ring | Release head] -> [Acquire head] -> Display List Executor -> GPU -> screen`
+*Status: the transport foundation is built and proven; everything else is the
+map. Spec governs: [`ARCHITECTURE.md`](ARCHITECTURE.md).*
 
