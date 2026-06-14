@@ -46,4 +46,4 @@ zig build test    # run the IPC unit tests
 
 # 
 
-![zig](./assets/zig-mark.svg)
+<img alt="Zig Mark" src="./assets/zig-mark.svg" width="400">
