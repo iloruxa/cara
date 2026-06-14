@@ -1,0 +1,95 @@
+# Cara: High-Level Architecture
+# Render:  d2 --layout=elk architecture.d2 architecture.svg
+# Lives at: docs/diagrams/architecture.d2  (rendered .svg next to it)
+#
+# Two processes, two channel kinds. Frames are latest-wins; atlas additions
+# are a stream. No pointers across the boundary, no executable memory in the
+# jail, no work while idle. The renderer is hostile: the host validates every
+# byte it sends. (Full prose: docs/architecture-overview.md, docs/ARCHITECTURE.md)
+
+direction: down
+
+bundle: {
+  shape: document
+  label: ".glyph + .luau bundle"
+}
+
+renderer: {
+  label: "RENDERER: UNTRUSTED, sandboxed, per origin, 100% Zig, no PROT_EXEC"
+  style.fill: "#FDF3E7"
+
+  parser: "Glyph parser: zero-alloc, md desugar"
+  luau: "Luau VM: interpreter-only (compiled from source, no bytecode load)"
+  react: "Reactivity: signals set DirtyFlags"
+  scene: "Scene graph ECS: generational u32"
+  systems: "Style · Strict-Box layout · Paint"
+  trinity: "Text Trinity + atlas layout"
+  imgdec: "Image decode (jailed)"
+  producer: "Frame producer: full list + damage"
+
+  parser -> scene: build
+  luau -> react
+  react -> scene: "the render gate"
+  scene -> systems: "dirty only"
+  systems -> trinity: "measure / shape"
+  trinity -> producer: "glyph runs (DrawTextRun)"
+  systems -> producer: "draw commands"
+}
+
+boundary: {
+  label: "TRUST BOUNDARY: the host treats every renderer byte as hostile:\nvalidating parser (bounds + masked indices), robust to a mutating producer"
+  shape: text
+  style: {
+    font-color: "#B23A2E"
+    bold: true
+  }
+}
+
+shm: {
+  label: "SHARED MEMORY: host-created, fd passed once (SCM_RIGHTS), memfd+F_SEAL_SHRINK on Linux"
+  style.fill: "#EAF2FB"
+
+  slots: "3 frame slots: latest-wins (latest: slot·dirty·gen)"
+  atlas: "atlas stream: exactly-once (head/tail, capacity ≥ 1 frame)"
+  staging: "image staging: idempotent, grow-only"
+}
+
+host: {
+  label: "HOST: TRUSTED, privileged, 100% Zig"
+  style.fill: "#EDF7EC"
+
+  ipcThread: "IPC thread (kqueue / epoll): tag/length/direction checked"
+  exec: "Frame executor: check-then-exchange, VALIDATE then @ptrCast"
+  gpu: "gpu.zig seam ⚑: hand-rolled vs wgpu-native"
+  hittest: "ID-buffer hit-test: O(1), generational handle"
+  window: "Window + event pump (glfw)"
+  services: "net (libcurl/TLS) · storage (SQLite) · clipboard · a11y  [TCB: unsandboxed]"
+  spawn: "Spawner: Linux zygote, macOS posix_spawn"
+
+  ipcThread -> exec: wake
+  exec -> gpu: "encode: damage at age 1, else full"
+  window -> hittest: "(x, y)"
+}
+
+osgpu: "OS · GPU · Network · Disk"
+
+# ---- page load ----
+bundle -> renderer.parser: "LoadPage (the host fetched it)"
+
+# ---- bulk data: shared memory (every host-bound edge is validated) ----
+renderer.producer -> shm.slots: "publish: release-exchange"
+shm.slots -> host.exec: "take newest: check, then exchange, then validate"
+renderer.trinity -> shm.atlas: "append bitmaps"
+shm.atlas -> host.exec: "drain to head (clamp to capacity; tail = ack)"
+renderer.imgdec -> shm.staging: "pixels, written once"
+shm.staging -> host.gpu: "upload by resource_id (bounds-checked) → UploadDone"
+
+# ---- control: IPC socket, 13 typed messages ----
+renderer.producer -> host.ipcThread: "FrameReady (wants_tick), after publish"
+host.exec -> renderer.react: "FrameTick: only while armed"
+host.hittest -> renderer.react: "InputEvent: handle + frame_seq"
+host.services <-> renderer.luau: "Fetch (host-origin + SSRF filter) · Storage (origin-bound)"
+host.spawn -> renderer: "shm fds + socket only (CLOEXEC)"
+
+# ---- the metal ----
+host.gpu -> osgpu: "Metal (CAMetalLayer) / Vulkan (Wayland)"

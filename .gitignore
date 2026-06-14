@@ -3,3 +3,4 @@
 zig-out/
 *.o
 vendor/wgpu
+**/.DS_STORE
