@@ -288,32 +288,29 @@ pub const Gpu = struct {
     }
 
     // --- per-frame paint: clear, then the rect (scissor-clipped) ---
-    pub fn paint(self: *Gpu, rect: ?draw.DrawRect) void {
+    // * Returns true if it presented; false if the surface had no drawable yet
+    // helps the caller to retry
+    pub fn paint(self: *Gpu, rect: ?draw.DrawRect) bool {
         var st: wgpu.WGPUSurfaceTexture = undefined;
         wgpu.wgpuSurfaceGetCurrentTexture(self.surface, &st);
 
-        const texture = st.texture orelse return;
+        const texture = st.texture orelse return false;
         defer wgpu.wgpuTextureRelease(texture);
 
-        const view = wgpu.wgpuTextureCreateView(texture, null) orelse return;
+        const view = wgpu.wgpuTextureCreateView(texture, null) orelse return false;
         defer wgpu.wgpuTextureViewRelease(view);
 
-        const encoder = wgpu.wgpuDeviceCreateCommandEncoder(self.device, null) orelse return;
+        const encoder = wgpu.wgpuDeviceCreateCommandEncoder(self.device, null) orelse return false;
         defer wgpu.wgpuCommandEncoderRelease(encoder);
 
         const attachments = [_]wgpu.WGPURenderPassColorAttachment{
             .{
-                // 0: visible color (the surface)
+                // 0: visible color (the surface), opaque black
                 .view = view,
                 .depthSlice = @intCast(wgpu.WGPU_DEPTH_SLICE_UNDEFINED),
                 .loadOp = @intCast(wgpu.WGPULoadOp_Clear),
                 .storeOp = @intCast(wgpu.WGPUStoreOp_Store),
-                .clearValue = .{
-                    .r = 0,
-                    .g = 0,
-                    .b = 0,
-                    .a = 0,
-                },
+                .clearValue = .{ .r = 0, .g = 0, .b = 0, .a = 1 },
             },
             .{
                 // 1: entity id (R32Uint), cleared to 0 = "no entity"
@@ -326,10 +323,9 @@ pub const Gpu = struct {
         };
 
         const pass_desc = wgpu.WGPURenderPassDescriptor{ .colorAttachmentCount = 2, .colorAttachments = &attachments };
-        const pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc) orelse return;
+        const pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc) orelse return false;
 
         if (rect) |rr| {
-            // Unpack 0xRRGGBBAA -> vec4<f32> 0..1 and upload to the uniform
             const rgba = rr.rgba;
             const rgba_f = [4]f32{
                 @as(f32, @floatFromInt((rgba >> 24) & 0xFF)) / 255.0,
@@ -349,12 +345,14 @@ pub const Gpu = struct {
         wgpu.wgpuRenderPassEncoderEnd(pass);
         wgpu.wgpuRenderPassEncoderRelease(pass);
 
-        const cmd = wgpu.wgpuCommandEncoderFinish(encoder, null) orelse return;
+        const cmd = wgpu.wgpuCommandEncoderFinish(encoder, null) orelse
+            return false;
         defer wgpu.wgpuCommandBufferRelease(cmd);
 
         const cmds = [_]wgpu.WGPUCommandBuffer{cmd};
         wgpu.wgpuQueueSubmit(self.queue, cmds.len, &cmds);
         _ = wgpu.wgpuSurfacePresent(self.surface);
+        return true;
     }
 
     pub fn hitTest(self: *Gpu, x: u32, y: u32) u32 {

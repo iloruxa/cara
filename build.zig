@@ -34,21 +34,22 @@ pub fn build(b: *std.Build) !void {
 
     // --- IPC ---
     //
-    // Shared IPC wire-format, imported by both processes so the host and
-    // renderer agree on the region layout from one source of truth.
-    const ring_module = b.createModule(.{
-        .root_source_file = b.path("src/ipc/ring.zig"),
+    // Frame-slot transport (the latest-wins shared region),
+    // imported by both processes so the host and renderer
+    // \agree on the region layout from one source of truth.
+    const frame_module = b.createModule(.{
+        .root_source_file = b.path("src/ipc/frame.zig"),
         .target = target,
         .optimize = optimize,
     });
-    host.root_module.addImport("ring", ring_module);
-    renderer.root_module.addImport("ring", ring_module);
+    host.root_module.addImport("frame", frame_module);
+    renderer.root_module.addImport("frame", frame_module);
 
-    // IPC: Ring tests
-    const ring_tests = b.addTest(.{ .root_module = ring_module });
-    const run_ring_tests = b.addRunArtifact(ring_tests);
+    // IPC: Frame transport tests
+    const frame_tests = b.addTest(.{ .root_module = frame_module });
+    const run_frame_tests = b.addRunArtifact(frame_tests);
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_ring_tests.step);
+    test_step.dependOn(&run_frame_tests.step);
 
     // IPC: Draw Module
     const draw_module = b.createModule(.{

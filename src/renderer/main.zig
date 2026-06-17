@@ -1,6 +1,6 @@
 const draw = @import("draw");
+const frame = @import("frame");
 const protocol = @import("protocol");
-const ring = @import("ring");
 const std = @import("std");
 
 // Dependent imports
@@ -19,11 +19,26 @@ fn readExact(stream: std.Io.net.Stream, io: std.Io, dst: []u8) !void {
     }
 }
 
+fn drain(stream: net.Stream, io: std.Io, length: u32) !void {
+    var remaining: usize = length;
+    var skip: [256]u8 = undefined;
+
+    while (remaining > 0) {
+        const want = @min(remaining, skip.len);
+
+        try readExact(stream, io, skip[0..want]);
+
+        remaining -= want;
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Cara renderer started\n", .{});
 
-    // The host passed the shm name as argv[1].
-    // Skip argv[0] (renderer process'es path)
+    // argv:
+    // - [0] -> self
+    // - [1] -> shm_name
+    // - [2] -> sock_path
     var it = init.minimal.args.iterate();
     _ = it.skip();
 
@@ -37,7 +52,8 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingSockPath;
     };
 
-    // Open the EXISTING region - no CREAT, the host already made it.
+    // Open the EXISTING region - no CREATE, the host already made it.
+    // Open-by-name is known-temporary: Host pass the fd via SCM_RIGHTS
     const oflags: std.c.O = .{ .ACCMODE = .RDWR };
     const fd = std.c.shm_open(shm_name.ptr, @bitCast(oflags), @as(c_uint, 0));
 
@@ -47,23 +63,17 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Map it - same size and flags the host used.
-    const mapping = try std.posix.mmap(null, ring.region_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
+    const mapping = try std.posix.mmap(null, frame.region_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
     defer std.posix.munmap(mapping);
 
-    // Overlay the shared header and validate it before trusting anything.
-    const header: *ring.Header = @ptrCast(@alignCast(mapping.ptr));
+    // Validate the host-created region before trusting a byte
+    const region: []align(frame.cache_line) u8 = mapping;
+    frame.validate(region) catch |err| {
+        std.debug.print("RENDERER: shared region invalid: {s}\n", .{@errorName(err)});
+        return err;
+    };
 
-    if (header.magic != ring.magic) {
-        std.debug.print("RENDERER: bad magic 0x{X} (expected 0x{X})\n", .{ header.magic, ring.magic });
-        return error.BadMagic;
-    }
-
-    if (header.version != ring.version) {
-        std.debug.print("RENDERER: version mismatch {d} (expected {d})\n", .{ header.version, ring.version });
-        return error.VersionMismatch;
-    }
-
-    std.debug.print("RENDERER: header OK - magic=0x{X} version={d} head={d} tail={d} via {s}\n", .{ header.magic, header.version, header.head, header.tail, shm_name });
+    std.debug.print("RENDERER: shared region OK via {s}\n", .{shm_name});
 
     const uaddr = try net.UnixAddress.init(sock_path);
     const control = try uaddr.connect(init.io);
@@ -71,58 +81,81 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("RENDERER: control channel connected\n", .{});
 
-    // --- Producer: write one frame of draw commands, then publish ---
-    const r = ring.Ring.init(mapping);
-    var w = r.writer();
+    // --- Producer ---
+    // Build one frame's display list, write a slot, publish
+    const frames = frame.Frames.init(region);
+    var producer = frames.producer();
+
+    var cmd_buf: [4096]u8 align(8) = undefined;
+    var enc = draw.Encoder{ .buf = &cmd_buf };
 
     const rect = draw.DrawRect{ .x = 32, .y = 48, .w = 240, .h = 120, .rgba = 0x3B82F6FF };
 
-    w.append(@intFromEnum(draw.DrawTag.rect), std.mem.asBytes(&rect)) catch |err| {
-        std.debug.print("RENDERER: append failed: {s}\n", .{@errorName(err)});
+    enc.command(.rect, rect) catch |err| {
+        std.debug.print("RENDERER: encode failed: {s}\n", .{@errorName(err)});
         return err;
     };
 
-    // Publish the whole frame with one Release-store
-    w.commit();
+    // viewport is 0 until the host supplies it via LoadPage/Resize
+    producer.writeFrame(.{ .seq = 1, .viewport_w = 0, .viewport_h = 0 }, &.{}, enc.bytes()) catch |err| {
+        std.debug.print("RENDERER: writeFrame failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
 
-    std.debug.print("RENDERER: committed frame ({d}-byte DrawRect), head now {d}\n", .{ @sizeOf(draw.DrawRect), header.head });
+    producer.publish();
 
-    // --- Receive control messages from the host until it closes the channel ---
+    std.debug.print("RENDERER: published frame seq=1 ({d} command bytes)\n", .{enc.bytes().len});
+
+    // Publish strictly before signal: FrameReady goes out right after puhblish
+    // before we block on input. flags=0 means no wants_tick - this frame is static
+    {
+        var ctl_buf: [64]u8 = undefined;
+        var cw = control.writer(init.io, &ctl_buf);
+        const env = protocol.Envelope{ .tag = @intFromEnum(protocol.Tag.frame_ready), .flags = 0, .length = 0, .seq = 1 };
+
+        cw.interface.writeAll(std.mem.asBytes(&env)) catch |err| {
+            std.debug.print("RENDERER: FrameReady write failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
+
+        cw.interface.flush() catch |err| {
+            std.debug.print("RENDERER: FrameReady flush failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
+    }
+
+    std.debug.print("RENDERER: sent FrameReady (after publish)\n", .{});
+
+    // --- Receive control messages until the host closes the channel ---
     std.debug.print("RENDERER: listening for input\n", .{});
 
     while (true) {
-        var hdr: protocol.MsgHeader = undefined;
+        var env: protocol.Envelope = undefined;
 
-        readExact(control, init.io, std.mem.asBytes(&hdr)) catch break;
+        readExact(control, init.io, std.mem.asBytes(&env)) catch break;
 
-        switch (@as(protocol.MsgKind, @enumFromInt(hdr.kind))) {
+        switch (@as(protocol.Tag, @enumFromInt(env.tag))) {
             .input_event => {
+                if (env.length != @sizeOf(protocol.InputEvent)) {
+                    std.debug.print("RENDERER: bad InputEvent length {d}\n", .{env.length});
+                    drain(control, init.io, env.length) catch break;
+                    continue;
+                }
+
                 var ev: protocol.InputEvent = undefined;
+
                 readExact(control, init.io, std.mem.asBytes(&ev)) catch break;
 
-                std.debug.print("RENDERER: InputEventt kind={d} at ({d},{d})entity={d}\n", .{ ev.kind, ev.x, ev.y, ev.entity });
+                std.debug.print("RENDERER InputEvent kind={d} at ({d},{d}) entity={d} frame_seq={d}\n", .{ ev.kind, ev.x, ev.y, ev.hit_entity, ev.frame_seq });
+
+                // Dispatch into the scene graph lands with the renderer brain
             },
             else => {
-                std.debug.print("RENDERER: unexpected message kind={d} len={d}\n", .{ hdr.kind, hdr.len });
-                break;
+                std.debug.print("RENDERER: unexpected tag={d} length={d}\n", .{ env.tag, env.length });
+                drain(control, init.io, env.length) catch break;
             },
         }
     }
 
-    // Signal the host that a frame is ready
-    const frame_ready = protocol.MsgHeader{ .kind = @intFromEnum(protocol.MsgKind.frame_ready), .len = 0 };
-
-    var ctl_buf: [64]u8 = undefined;
-    var cw = control.writer(init.io, &ctl_buf);
-
-    cw.interface.writeAll(std.mem.asBytes(&frame_ready)) catch |err| {
-        std.debug.print("RENDERER: FrameReady write failed: {s}\n", .{@errorName(err)});
-    };
-
-    cw.interface.flush() catch |err| {
-        std.debug.print("RENDERER: FrameReady flush failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
-
-    std.debug.print("RENDERER: sent FrameReady\n", .{});
+    std.debug.print("RENDERER: control channel closed, exiting\n", .{});
 }

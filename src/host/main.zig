@@ -1,18 +1,31 @@
 const draw = @import("draw");
+const frame = @import("frame");
 const glfw = @import("glfw");
 const protocol = @import("protocol");
-const ring = @import("ring");
 const std = @import("std");
-const net = std.Io.net;
+
+// Module imports
 const Gpu = @import("gpu.zig").Gpu;
+
+// Dependent imports
+const net = std.Io.net;
 
 const ClickCtx = struct {
     gpu: *Gpu,
     control: net.Stream,
     io: std.Io,
+
+    // seq of the frame currently on screen (for InputEvent)
+    frame_seq: u32 = 0,
+
+    // host's outgoing envelope counter
+    send_seq: u32 = 0,
+
+    // Set by expose/resize; loop re-presents the held frame
+    needs_repaint: bool = true,
 };
 
-// --- Input: left-click -> hit-test -> send InputEvent to the renderer ---
+// --- Input: left-click -> hit-test -> InputEvent to the renderer ---
 fn onMouseButton(window: ?*glfw.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.c) void {
     _ = mods;
 
@@ -46,53 +59,85 @@ fn onMouseButton(window: ?*glfw.GLFWwindow, button: c_int, action: c_int, mods: 
 
     std.debug.print("HOST: click ({d},{d}) -> entity {d}\n", .{ px, py, entity });
 
-    // dispatch to the renderer
+    ctx.send_seq +%= 1;
+
     const ev = protocol.InputEvent{
         .kind = @intFromEnum(protocol.InputKind.mouse_down),
         .modifiers = 0,
         .x = @floatFromInt(px),
         .y = @floatFromInt(py),
-        .entity = entity,
+        .hit_entity = entity,
+        .frame_seq = ctx.frame_seq,
     };
 
-    const hdr = protocol.MsgHeader{
-        .kind = @intFromEnum(protocol.MsgKind.input_event),
-        .len = @sizeOf(protocol.InputEvent),
+    const env = protocol.Envelope{
+        .tag = @intFromEnum(protocol.Tag.input_event),
+        .flags = 0,
+        .length = @sizeOf(protocol.InputEvent),
+        .seq = ctx.send_seq,
     };
 
     var buf: [64]u8 = undefined;
     var cw = ctx.control.writer(ctx.io, &buf);
 
-    cw.interface.writeAll(std.mem.asBytes(&hdr)) catch return;
+    cw.interface.writeAll(std.mem.asBytes(&env)) catch return;
     cw.interface.writeAll(std.mem.asBytes(&ev)) catch return;
     cw.interface.flush() catch return;
 }
 
+// --- Expose: the window was shown or uncovered, re-present the held frame
+fn onWindowRefresh(window: ?*glfw.GLFWwindow) callconv(.c) void {
+    const ctx: *ClickCtx = @ptrCast(@alignCast(glfw.glfwGetWindowUserPointer(window)));
+    ctx.needs_repaint = true;
+}
+
+// --- Resize: marks a repaint ---
+fn onFramebufferSize(window: ?*glfw.GLFWwindow, width: c_int, height: c_int) callconv(.c) void {
+    _ = width;
+    _ = height;
+
+    const ctx: *ClickCtx = @ptrCast(@alignCast(glfw.glfwGetWindowUserPointer(window)));
+    ctx.needs_repaint = true;
+}
+
+fn readFull(stream: net.Stream, io: std.Io, dst: []u8) !void {
+    var got: usize = 0;
+
+    while (got < dst.len) {
+        var bufs: [1][]u8 = .{dst[got..]};
+        const n = try stream.read(io, &bufs);
+
+        if (n == 0) return error.ChannelClosed;
+
+        got += n;
+    }
+}
+
 // --- IPC Thread: wake the GLFW loop on each FrameReady ---
-fn controlLoop(control: std.Io.net.Stream, io: std.Io) void {
+fn controlLoop(control: net.Stream, io: std.Io) void {
     while (true) {
-        var msg: protocol.MsgHeader = undefined;
-        const bytes = std.mem.asBytes(&msg);
-        var got: usize = 0;
+        var env: protocol.Envelope = undefined;
 
-        while (got < bytes.len) {
-            var bufs: [1][]u8 = .{bytes[got..]};
-            const n = control.read(io, &bufs) catch |err| {
-                std.debug.print("IPC: control read failed: {s}\n", .{@errorName(err)});
-                return;
-            };
+        readFull(control, io, std.mem.asBytes(&env)) catch {
+            std.debug.print("IPC: control channel closed\n", .{});
+            return;
+        };
 
-            if (n == 0) {
-                std.debug.print("IPC: control channel closed\n", .{});
-                return;
-            }
+        // Drain any payload: this thread only reacts to the envelope tag
+        var remaining: usize = env.length;
+        var skip: [256]u8 = undefined;
 
-            got += n;
+        while (remaining > 0) {
+            const want = @min(remaining, skip.len);
+
+            readFull(control, io, skip[0..want]) catch return;
+
+            remaining -= want;
         }
 
-        switch (@as(protocol.MsgKind, @enumFromInt(msg.kind))) {
+        switch (@as(protocol.Tag, @enumFromInt(env.tag))) {
             .frame_ready => glfw.glfwPostEmptyEvent(),
-            else => std.debug.print("IPC: unexpected message kind={d}\n", .{msg.kind}),
+            else => std.debug.print("IPC: unexpected tag={d}\n", .{env.tag}),
         }
     }
 }
@@ -118,7 +163,7 @@ pub fn main(init: std.process.Init) !void {
     var gpu = try Gpu.init(window);
     defer gpu.deinit();
 
-    // --- Shared memory ring region ---
+    // --- Shared frame-slot region ---
     var name_buf: [64]u8 = undefined;
     const shm_name = try std.fmt.bufPrintSentinel(&name_buf, "/cara-shm-{d}", .{std.c.getpid()}, 0);
     _ = std.c.shm_unlink(shm_name.ptr);
@@ -134,23 +179,20 @@ pub fn main(init: std.process.Init) !void {
     // Teardown on any exit from here - including error returns below.
     defer _ = std.c.shm_unlink(shm_name.ptr);
 
-    const trunc = std.c.ftruncate(fd, ring.region_size);
+    const trunc = std.c.ftruncate(fd, frame.region_size);
     if (trunc != 0) {
         std.debug.print("HOST: ftruncate failed: {s}\n", .{@tagName(std.posix.errno(trunc))});
         return error.FtruncateFailed;
     }
 
-    const mapping = try std.posix.mmap(null, ring.region_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
+    const mapping = try std.posix.mmap(null, frame.region_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
     defer std.posix.munmap(mapping);
 
-    const header: *ring.Header = @ptrCast(@alignCast(mapping.ptr));
-    header.magic = ring.magic;
-    header.version = ring.version;
-    header.head = 0;
-    header.tail = 0;
-    std.debug.print("HOST: created {s}, header magic=0x{X} version={d}\n", .{ shm_name, header.magic, header.version });
+    const region: []align(frame.cache_line) u8 = mapping;
+    frame.writeInitialHeader(region);
+    std.debug.print("HOST: created {s} ({d} bytes)\n", .{ shm_name, frame.region_size });
 
-    // --- Control channel: named Unix socket (via std.Io.net) ---
+    // --- Control channel: named Unix socket ---
     var sock_buf: [64]u8 = undefined;
     const sock_path = try std.fmt.bufPrint(&sock_buf, "/tmp/cara-sock-{d}", .{std.c.getpid()});
 
@@ -178,48 +220,62 @@ pub fn main(init: std.process.Init) !void {
 
     glfw.glfwSetWindowUserPointer(window, &click_ctx);
     _ = glfw.glfwSetMouseButtonCallback(window, &onMouseButton);
-
+    _ = glfw.glfwSetWindowRefreshCallback(window, &onWindowRefresh);
+    _ = glfw.glfwSetFramebufferSizeCallback(window, &onFramebufferSize);
     std.debug.print("HOST: control channel connected\n", .{});
 
-    // --- Consumer: drain the frame the renderer published ---
-    const r = ring.Ring.init(mapping);
+    // --- Consumer + IPC Thread + Event-driven render loop ---
+    const frames = frame.Frames.init(region);
+    var consumer = frames.consumer();
 
     // --- IPC thread + render loop ---
     const ipc = try std.Thread.spawn(.{}, controlLoop, .{ control, init.io });
 
-    // First frame, so the window shows immediately
-    var current_rect: ?draw.DrawRect = null;
-    gpu.paint(current_rect);
+    // The held display list.
+    // needs_repaint starts true and is re-armed by expose/resize so the frame is (re)presented
+    // once window is genuinely on screen, not just once as it appears
+    var held: ?draw.DrawRect = null;
 
     // Wakes on OS events and on FrameReady (posted by the IPC thread).
-    // On each wake, drain whatever the renderer published - a no-op if the ring is empty
+    // We paint only when a new frame is taken
+    // A coalesced wake with nothing new stays idle.
     while (glfw.glfwWindowShouldClose(window) == glfw.GLFW_FALSE) {
         glfw.glfwWaitEvents();
 
-        if (r.reader()) |frame| {
-            var rd = frame;
+        // A newly published frame updates the held display list
+        if (consumer.take()) |slot| {
+            const fr = frame.parse(slot);
+            click_ctx.frame_seq = fr.header.seq;
 
-            while (rd.next()) |rec| {
-                switch (@as(draw.DrawTag, @enumFromInt(rec.tag))) {
+            var cmds = draw.Iterator{ .buf = fr.commands };
+
+            while (cmds.next()) |cmd| {
+                switch (cmd.tag) {
                     .rect => {
-                        if (rec.bytes.len != @sizeOf(draw.DrawRect)) {
-                            std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{rec.bytes.len});
-                            continue;
-                        }
-
-                        const cmd: *const draw.DrawRect = @ptrCast(@alignCast(rec.bytes.ptr));
-                        current_rect = cmd.*;
-                        std.debug.print("HOST: DrawRect x={d} y={d} w={d} h={d} rgba=0x{X}\n", .{ cmd.x, cmd.y, cmd.w, cmd.h, cmd.rgba });
+                        if (cmd.payload.len == @sizeOf(draw.DrawRect)) {
+                            const r: *const draw.DrawRect = @ptrCast(@alignCast(cmd.payload.ptr));
+                            held = r.*;
+                        } else std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{cmd.payload.len});
                     },
-                    else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ rec.tag, rec.bytes.len }),
+                    else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ @intFromEnum(cmd.tag), cmd.payload.len }),
                 }
             }
 
-            rd.commit();
+            click_ctx.needs_repaint = true;
+            std.debug.print("HOST: took frame seq={d}\n", .{fr.header.seq});
         }
 
-        // Repaint each wake
-        gpu.paint(current_rect);
+        // Paint on a new frame or an expose/resize
+        // If the surface has no drawable yet (window still appearing -> Occluded),
+        // keep the flag set and wake ourselves so we retry on the next pump,
+        // until it is on screen
+        if (click_ctx.needs_repaint) {
+            if (gpu.paint(held)) {
+                click_ctx.needs_repaint = false;
+            } else {
+                glfw.glfwPostEmptyEvent();
+            }
+        }
     }
 
     // Window closing: unblock the IPC thread's blocking read, then join it.
@@ -227,13 +283,13 @@ pub fn main(init: std.process.Init) !void {
     ipc.join();
 }
 
-fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, sock_pth: []const u8) !void {
+fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, sock_path: []const u8) !void {
     const self_dir = try std.process.executableDirPathAlloc(io, gpa);
     defer gpa.free(self_dir);
 
     const renderer_path = try std.fs.path.join(gpa, &.{ self_dir, "cara-renderer" });
     defer gpa.free(renderer_path);
 
-    const argv = [_][]const u8{ renderer_path, shm_name, sock_pth };
+    const argv = [_][]const u8{ renderer_path, shm_name, sock_path };
     _ = try std.process.spawn(io, .{ .argv = &argv });
 }
