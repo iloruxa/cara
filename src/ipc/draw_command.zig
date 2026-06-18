@@ -14,9 +14,10 @@
 const std = @import("std");
 
 /// Tags starts at 1 so a zeroed header (tag 0) i detectably invalid.
-/// Only `rect` exists today; `DrawTextRun`, `DrawImage`, and `Clip` join later
+/// Only `rect` & `text_run` exists today; `DrawImage`, and `Clip` join later
 pub const DrawTag = enum(u32) {
     rect = 1,
+    text_run = 2,
     _,
 };
 
@@ -43,6 +44,36 @@ comptime {
     std.debug.assert(@alignOf(CommandHeader) <= 8);
     // Must drop onto the ring's 8-aligned payload and be @ptrCast in place.
     std.debug.assert(@alignOf(DrawRect) <= 8);
+}
+
+/// Heaader of a DrawTextRun command's payload, followed by `glyph_count`
+/// PackedGlyphs. One color per run
+pub const TextRunHeader = extern struct {
+    // 0xRRGGBBAA, applied to every glyph in the run
+    rgba: u32,
+
+    glyph_count: u32,
+};
+
+/// One positioned glyph. The host draws an atlas_w x atlas_h quad
+/// at (screen_x, screen_y) framebuffer px, sampling atlas texels
+/// [atlas_x, atlas_x + atlas_y) x [atlas_y, atlas_y + atlas_h]
+/// Quad size equals the atlas cell because the glyph was rasterized
+/// at its target pixel size.
+/// 16 Bytes
+pub const PackedGlyph = extern struct {
+    screen_x: f32,
+    screen_y: f32,
+    atlas_x: u16,
+    atlas_y: u16,
+    atlas_w: u16,
+    atlas_h: u16,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(TextRunHeader) == 8);
+    std.debug.assert(@sizeOf(PackedGlyph) == 16);
+    std.debug.assert(@alignOf(TextRunHeader) <= 8 and @alignOf(PackedGlyph) <= 8);
 }
 
 /// Round `n` up to the next multiple of 8
@@ -89,6 +120,39 @@ pub const Encoder = struct {
     pub fn bytes(self: *const Encoder) []const u8 {
         return self.buf[0..self.len];
     }
+
+    /// Append a packed text run: a TextRunHeader then the glyphs, as one command
+    /// The whole run is a single DrawTextRun, never one command per glyph
+    pub fn textRun(self: *Encoder, rgba: u32, glyphs: []const PackedGlyph) Overflow!void {
+        const glyph_bytes = std.mem.sliceAsBytes(glyphs);
+        const payload_len = @sizeOf(TextRunHeader) + glyph_bytes.len;
+        const record = command_header_size + padTo8(payload_len);
+
+        if (record > self.buf.len - self.len) return error.Overflow;
+
+        const cmd = CommandHeader{ .tag = @intFromEnum(DrawTag.text_run), .size = @intCast(payload_len) };
+
+        @memcpy(self.buf[self.len..][0..command_header_size], std.mem.asBytes(&cmd));
+
+        var off = self.len + command_header_size;
+
+        const trh = TextRunHeader{ .rgba = rgba, .glyph_count = @intCast(glyphs.len) };
+
+        @memcpy(self.buf[off..][0..@sizeOf(TextRunHeader)], std.mem.asBytes(&trh));
+
+        off += @sizeOf(TextRunHeader);
+
+        @memcpy(self.buf[off..][0..glyph_bytes.len], glyph_bytes);
+
+        off += glyph_bytes.len;
+
+        // always 0 (8 + 16n), kept for symmetry
+        const pad = padTo8(payload_len) - payload_len;
+
+        if (pad != 0) @memset(self.buf[off..][0..pad], 0);
+
+        self.len += record;
+    }
 };
 
 /// Walks a command list in place (no copies). Bounds-checked: a truncated tail
@@ -118,6 +182,28 @@ pub const Iterator = struct {
         return .{ .tag = @enumFromInt(hdr.tag), .payload = payload };
     }
 };
+
+pub const TextRun = struct {
+    rgba: u32,
+    glyphs: []const PackedGlyph,
+};
+
+/// Decode a DrawTextRun command's payload in place (no copy)
+/// Returns null if the payload is too short for its declared glyph_count
+/// The payload begins 8-aligned in a slot so the casts are sound there
+pub fn parseTextRun(payload: []const u8) ?TextRun {
+    if (payload.len < @sizeOf(TextRunHeader)) return null;
+
+    const trh: *const TextRunHeader = @ptrCast(@alignCast(payload.ptr));
+    const rest = payload[@sizeOf(TextRunHeader)..];
+    const need = @as(usize, trh.glyph_count) * @sizeOf(PackedGlyph);
+
+    if (rest.len < need) return null;
+
+    const glyphs: []const PackedGlyph = @as([*]const PackedGlyph, @ptrCast(@alignCast(rest.ptr)))[0..trh.glyph_count];
+
+    return .{ .rgba = trh.rgba, .glyphs = glyphs };
+}
 
 // --- Tests ---
 const testing = std.testing;
@@ -174,4 +260,58 @@ test "encoder rejects a command that does not fit, writing nothing" {
     var enc = Encoder{ .buf = &small };
     try testing.expectError(error.Overflow, enc.command(.rect, DrawRect{ .x = 0, .y = 0, .w = 0, .h = 0, .rgba = 0 }));
     try testing.expectEqual(@as(usize, 0), enc.bytes().len);
+}
+
+test "PackedGlyph and TextRunHeader have stable layouts" {
+    try testing.expectEqual(@as(usize, 8), @sizeOf(TextRunHeader));
+    try testing.expectEqual(@as(usize, 16), @sizeOf(PackedGlyph));
+}
+
+test "encode a text run, iterate and parse it back" {
+    var buf: [256]u8 align(8) = undefined;
+    var enc = Encoder{ .buf = &buf };
+
+    const glyphs = [_]PackedGlyph{
+        .{ .screen_x = 10, .screen_y = 20, .atlas_x = 1, .atlas_y = 2, .atlas_w = 8, .atlas_h = 12 },
+        .{ .screen_x = 18, .screen_y = 20, .atlas_x = 9, .atlas_y = 2, .atlas_w = 7, .atlas_h = 12 },
+    };
+    try enc.textRun(0x3B82F6FF, &glyphs);
+
+    var it = Iterator{ .buf = enc.bytes() };
+    const cmd = it.next() orelse return error.NoCommand;
+    try testing.expectEqual(DrawTag.text_run, cmd.tag);
+
+    const run = parseTextRun(cmd.payload) orelse return error.BadRun;
+    try testing.expectEqual(@as(u32, 0x3B82F6FF), run.rgba);
+    try testing.expectEqual(@as(usize, 2), run.glyphs.len);
+    try testing.expectEqual(glyphs[1].atlas_x, run.glyphs[1].atlas_x);
+    try testing.expectEqual(glyphs[0].screen_x, run.glyphs[0].screen_x);
+    try testing.expect(it.next() == null);
+}
+
+test "a rect and a text run coexist in one command stream" {
+    var buf: [256]u8 align(8) = undefined;
+    var enc = Encoder{ .buf = &buf };
+    try enc.command(.rect, DrawRect{ .x = 0, .y = 0, .w = 4, .h = 4, .rgba = 0xFF0000FF });
+    const glyphs = [_]PackedGlyph{.{ .screen_x = 1, .screen_y = 1, .atlas_x = 0, .atlas_y = 0, .atlas_w = 5, .atlas_h = 9 }};
+    try enc.textRun(0x00FF00FF, &glyphs);
+
+    var it = Iterator{ .buf = enc.bytes() };
+    try testing.expectEqual(DrawTag.rect, (it.next() orelse return error.NoCommand).tag);
+    const c2 = it.next() orelse return error.NoCommand;
+    try testing.expectEqual(DrawTag.text_run, c2.tag);
+    try testing.expectEqual(@as(usize, 1), (parseTextRun(c2.payload) orelse
+        return error.BadRun).glyphs.len);
+    try testing.expect(it.next() == null);
+}
+
+test "parseTextRun rejects a truncated payload" {
+    var buf: [256]u8 align(8) = undefined;
+    var enc = Encoder{ .buf = &buf };
+    const glyphs = [_]PackedGlyph{.{ .screen_x = 0, .screen_y = 0, .atlas_x = 0, .atlas_y = 0, .atlas_w = 1, .atlas_h = 1 }};
+    try enc.textRun(0, &glyphs);
+
+    var it = Iterator{ .buf = enc.bytes() };
+    const cmd = it.next() orelse return error.NoCommand;
+    try testing.expect(parseTextRun(cmd.payload[0 .. cmd.payload.len - 8]) == null); // claims 1 glyph, body short
 }
