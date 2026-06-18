@@ -32,6 +32,17 @@ pub fn build(b: *std.Build) !void {
     renderer.root_module.link_libc = true;
     b.installArtifact(renderer);
 
+    // --- Freetype (hexops package): Freetype's C source compiled to a `freetype`
+    // static lib + its headers. The renderer owns rasterization, so only it links it
+    const freetype_dep = b.dependency("freetype", .{ .target = target, .optimize = optimize });
+    renderer.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+
+    // Bindings: translate-c Freetype's public header at build time against the
+    // package's include dir, exposed to the renderer as `freetype`
+    const ft_c = b.addTranslateC(.{ .root_source_file = b.path("vendor/freetype_c.h"), .target = target, .optimize = optimize });
+    ft_c.addIncludePath(freetype_dep.path("include"));
+    renderer.root_module.addImport("freetype", ft_c.createModule());
+
     // --- IPC ---
     //
     // Frame-slot transport (the latest-wins shared region),

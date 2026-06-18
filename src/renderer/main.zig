@@ -1,5 +1,6 @@
 const draw = @import("draw");
 const frame = @import("frame");
+const raster = @import("raster.zig");
 const protocol = @import("protocol");
 const std = @import("std");
 
@@ -34,6 +35,24 @@ fn drain(stream: net.Stream, io: std.Io, length: u32) !void {
 
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Cara renderer started\n", .{});
+
+    // --- Rasterizer smoke test (temporary): render 'A' and report metrics ---
+    {
+        var rast = raster.Rasterizer.init("assets/fonts/DejaVuSans.ttf", 32) catch |err| {
+            std.debug.print("RENDERER: rasterizer init failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        defer rast.deinit();
+
+        var cov: [128 * 128]u8 = undefined;
+        const g = try rast.rasterize('A', &cov);
+
+        var ink: u64 = 0;
+
+        for (g.coverage) |c| ink += c;
+
+        std.debug.print("RENDERER: glyph 'A' {d}x{d} bearing=({d},{d}) advance={d} ink_sum={d}\n", .{ g.width, g.height, g.bearing_x, g.bearing_y, g.advance, ink });
+    }
 
     // argv:
     // - [0] -> self
