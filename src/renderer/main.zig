@@ -1,3 +1,4 @@
+const atlas = @import("atlas.zig");
 const draw = @import("draw");
 const frame = @import("frame");
 const raster = @import("raster.zig");
@@ -36,24 +37,6 @@ fn drain(stream: net.Stream, io: std.Io, length: u32) !void {
 
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Cara renderer started\n", .{});
-
-    // --- Rasterizer smoke test (temporary): render 'A' and report metrics ---
-    {
-        var rast = raster.Rasterizer.init("assets/fonts/DejaVuSans.ttf", 32) catch |err| {
-            std.debug.print("RENDERER: rasterizer init failed: {s}\n", .{@errorName(err)});
-            return err;
-        };
-        defer rast.deinit();
-
-        var cov: [128 * 128]u8 = undefined;
-        const g = try rast.rasterize('A', &cov);
-
-        var ink: u64 = 0;
-
-        for (g.coverage) |c| ink += c;
-
-        std.debug.print("RENDERER: glyph 'A' {d}x{d} bearing=({d},{d}) advance={d} ink_sum={d}\n", .{ g.width, g.height, g.bearing_x, g.bearing_y, g.advance, ink });
-    }
 
     // argv:
     // - [0] -> self
@@ -130,6 +113,28 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("RENDERER: staging region OK via {s} cap={d}\n", .{ staging_name, staging_cap });
 
+    // --- Rasterizer, pack and stream one glyph through the atlas stream ---
+    const atlas_region = staging.Staging.init(staging_region, staging_cap);
+    var atlas_stream = atlas_region.producer();
+
+    // atlas dims; the host's atlas texture must match
+    var packer = atlas.Packer.init(1024, 1024);
+
+    var rast = raster.Rasterizer.init("assets/fonts/DejaVuSans.ttf", 32) catch |err| {
+        std.debug.print("RENDERER: rasterizer init failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    defer rast.deinit();
+
+    var glyph_cov: [256 * 256]u8 = undefined;
+    const g = try rast.rasterize('A', &glyph_cov);
+    const cell = packer.alloc(g.width, g.height) catch |err| {
+        std.debug.print("RENDERER: atlas pack failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    std.debug.print("RENDERER: streamed glyph 'A' -> atlas ({d},{d}) {d}x{d}\n", .{ cell.x, cell.y, g.width, g.height });
+
     const uaddr = try net.UnixAddress.init(sock_path);
     const control = try uaddr.connect(init.io);
     defer control.close(init.io);
@@ -152,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // viewport is 0 until the host supplies it via LoadPage/Resize
-    producer.writeFrame(.{ .seq = 1, .viewport_w = 0, .viewport_h = 0 }, &.{}, enc.bytes()) catch |err| {
+    producer.writeFrame(.{ .seq = 1, .viewport_w = 0, .viewport_h = 0, .atlas_head_required = atlas_stream.headCursor() }, &.{}, enc.bytes()) catch |err| {
         std.debug.print("RENDERER: writeFrame failed: {s}\n", .{@errorName(err)});
         return err;
     };

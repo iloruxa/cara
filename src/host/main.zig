@@ -263,6 +263,11 @@ pub fn main(init: std.process.Init) !void {
     const frames = frame.Frames.init(region);
     var consumer = frames.consumer();
 
+    // Atlas-stream consumer + scratch for the largest glyph's coverage
+    const atlas_region = staging.Staging.init(staging_region, staging_cap);
+    var atlas_consumer = atlas_region.consumer();
+    var glyph_cov: [256 * 256]u8 = undefined;
+
     // --- IPC thread + render loop ---
     const ipc = try std.Thread.spawn(.{}, controlLoop, .{ control, init.io });
 
@@ -281,6 +286,12 @@ pub fn main(init: std.process.Init) !void {
         if (consumer.take()) |slot| {
             const fr = frame.parse(slot);
             click_ctx.frame_seq = fr.header.seq;
+
+            // Drain the atlas stream to head (atlas_head_required is the floor)
+            // GPU upload comes next
+            while (atlas_consumer.pop(&glyph_cov) catch null) |drained| {
+                std.debug.print("HOST: drained atlas glyph at ({d},{d}) {d}x{d} len={d}\n", .{ drained.entry.atlas_x, drained.entry.atlas_y, drained.entry.width, drained.entry.height, drained.coverage.len });
+            }
 
             var cmds = draw.Iterator{ .buf = fr.commands };
 
