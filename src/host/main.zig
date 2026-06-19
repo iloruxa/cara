@@ -290,6 +290,7 @@ pub fn main(init: std.process.Init) !void {
             // Drain the atlas stream to head (atlas_head_required is the floor)
             // GPU upload comes next
             while (atlas_consumer.pop(&glyph_cov) catch null) |drained| {
+                gpu.uploadGlyph(drained.entry.atlas_x, drained.entry.atlas_y, drained.entry.width, drained.entry.height, drained.coverage);
                 std.debug.print("HOST: drained atlas glyph at ({d},{d}) {d}x{d} len={d}\n", .{ drained.entry.atlas_x, drained.entry.atlas_y, drained.entry.width, drained.entry.height, drained.coverage.len });
             }
 

@@ -133,6 +133,11 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
+    atlas_stream.push(.{ .atlas_x = cell.x, .atlas_y = cell.y, .width = g.width, .height = g.height }, g.coverage) catch |err| {
+        std.debug.print("RENDERER: atlas push failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
     std.debug.print("RENDERER: streamed glyph 'A' -> atlas ({d},{d}) {d}x{d}\n", .{ cell.x, cell.y, g.width, g.height });
 
     const uaddr = try net.UnixAddress.init(sock_path);

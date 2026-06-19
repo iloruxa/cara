@@ -162,8 +162,9 @@ pub const Gpu = struct {
     id_texture: wgpu.WGPUTexture,
     id_view: wgpu.WGPUTextureView,
     readback: wgpu.WGPUBuffer,
+    atlas_texture: wgpu.WGPUTexture,
 
-    pub const Error = error{ Instance, NoCocoaWindow, NoMetalLayer, Surface, Adapter, Device, Pipeline, IdTexture, Readback };
+    pub const Error = error{ Instance, NoCocoaWindow, NoMetalLayer, Surface, Adapter, Device, Pipeline, IdTexture, Readback, AtlasTexture };
 
     pub fn init(window: *glfw.GLFWwindow) Error!Gpu {
         const instance = wgpu.wgpuCreateInstance(null) orelse return error.Instance;
@@ -258,6 +259,19 @@ pub const Gpu = struct {
         const readback = wgpu.wgpuDeviceCreateBuffer(device, &rb_desc) orelse return error.Readback;
         errdefer wgpu.wgpuBufferRelease(readback);
 
+        // Glyph atlas: R8 coverage, written as glyphs stream in,
+        // sampled by the GlyphPainter 1024x1024 matches the renderer's packer
+        const atlas_desc = wgpu.WGPUTextureDescriptor{
+            .usage = wgpu.WGPUTextureUsage_TextureBinding | wgpu.WGPUTextureUsage_CopyDst,
+            .dimension = @intCast(wgpu.WGPUTextureDimension_2D),
+            .size = .{ .width = 1024, .height = 1024, .depthOrArrayLayers = 1 },
+            .format = @intCast(wgpu.WGPUTextureFormat_R8Unorm),
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+        };
+        const atlas_texture = wgpu.wgpuDeviceCreateTexture(device, &atlas_desc) orelse return error.AtlasTexture;
+        errdefer wgpu.wgpuTextureRelease(atlas_texture);
+
         std.debug.print("HOST: gpu ready ({d}x{d}, +id buffer)\n", .{ fb_w, fb_h });
 
         return .{
@@ -270,6 +284,7 @@ pub const Gpu = struct {
             .id_texture = id_texture,
             .id_view = id_view,
             .readback = readback,
+            .atlas_texture = atlas_texture,
         };
     }
 
@@ -285,6 +300,7 @@ pub const Gpu = struct {
         wgpu.wgpuSurfaceRelease(self.surface);
         wgpu.wgpuInstanceRelease(self.instance);
         wgpu.wgpuBufferRelease(self.readback);
+        wgpu.wgpuTextureRelease(self.atlas_texture);
     }
 
     // --- per-frame paint: clear, then the rect (scissor-clipped) ---
@@ -393,5 +409,23 @@ pub const Gpu = struct {
         wgpu.wgpuBufferUnmap(self.readback);
 
         return id;
+    }
+
+    /// Upload one glyh's 8-bit coverage into the atlas at (x, y)
+    /// Coverage is tightly packed (stride = w)
+    /// writeTexture has no 256-byte row-alignment requirement
+    /// unlike a buffer copy, so width is fine as bytesPerRow
+    pub fn uploadGlyph(self: *Gpu, x: u32, y: u32, w: u32, h: u32, coverage: []const u8) void {
+        if (w == 0 or h == 0) return;
+
+        const dst = wgpu.WGPUTexelCopyTextureInfo{
+            .texture = self.atlas_texture,
+            .mipLevel = 0,
+            .origin = .{ .x = x, .y = y, .z = 0 },
+            .aspect = @intCast(wgpu.WGPUTextureAspect_All),
+        };
+        const layout = wgpu.struct_WGPUTexelCopyBufferLayout{ .offset = 0, .bytesPerRow = w, .rowsPerImage = h };
+        const extent = wgpu.WGPUExtent3D{ .width = w, .height = h, .depthOrArrayLayers = 1 };
+        wgpu.wgpuQueueWriteTexture(self.queue, &dst, coverage.ptr, coverage.len, &layout, &extent);
     }
 };
