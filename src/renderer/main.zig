@@ -2,6 +2,7 @@ const draw = @import("draw");
 const frame = @import("frame");
 const raster = @import("raster.zig");
 const protocol = @import("protocol");
+const staging = @import("staging");
 const std = @import("std");
 
 // Dependent imports
@@ -71,6 +72,20 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingSockPath;
     };
 
+    const staging_name = it.next() orelse {
+        std.debug.print("RENDERER: no staging_name in argv\n", .{});
+        return error.MissingStagingName;
+    };
+
+    const staging_cap = blk: {
+        const s = it.next() orelse {
+            std.debug.print("RENDERER: no staging_cap in argv\n", .{});
+            return error.MissingStagingCap;
+        };
+
+        break :blk try std.fmt.parseInt(u32, s, 10);
+    };
+
     // Open the EXISTING region - no CREATE, the host already made it.
     // Open-by-name is known-temporary: Host pass the fd via SCM_RIGHTS
     const oflags: std.c.O = .{ .ACCMODE = .RDWR };
@@ -93,6 +108,27 @@ pub fn main(init: std.process.Init) !void {
     };
 
     std.debug.print("RENDERER: shared region OK via {s}\n", .{shm_name});
+
+    // --- Map the staging region (the atlas stream) shared by the host ---
+    const staging_oflags: std.c.O = .{ .ACCMODE = .RDWR };
+    const staging_fd = std.c.shm_open(staging_name.ptr, @bitCast(staging_oflags), @as(c_uint, 0));
+
+    if (staging_fd < 0) {
+        std.debug.print("RENDERER: staging shm_open({s}) failed: {s}\n", .{ staging_name, @tagName(std.posix.errno(staging_fd)) });
+        return error.ShmOpenFailed;
+    }
+
+    const staging_map = try std.posix.mmap(null, staging.regionSize(staging_cap), .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, staging_fd, 0);
+    defer std.posix.munmap(staging_map);
+
+    const staging_region: []align(staging.cache_line) u8 = staging_map;
+
+    staging.validate(staging_region, staging_cap) catch |err| {
+        std.debug.print("RENDERER: staging region invalid: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    std.debug.print("RENDERER: staging region OK via {s} cap={d}\n", .{ staging_name, staging_cap });
 
     const uaddr = try net.UnixAddress.init(sock_path);
     const control = try uaddr.connect(init.io);

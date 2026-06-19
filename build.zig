@@ -86,6 +86,14 @@ pub fn build(b: *std.Build) !void {
     const run_protocol_tests = b.addRunArtifact(protocol_tests);
     test_step.dependOn(&run_protocol_tests.step);
 
+    // IPC: staging region (the atlas stream), imported by both processes
+    const staging_module = b.createModule(.{ .root_source_file = b.path("src/ipc/staging.zig"), .target = target, .optimize = optimize });
+    host.root_module.addImport("staging", staging_module);
+    renderer.root_module.addImport("staging", staging_module);
+
+    const staging_tests = b.addTest(.{ .root_module = staging_module });
+    test_step.dependOn(&b.addRunArtifact(staging_tests).step);
+
     // --- GPU: wgpu-native (WebGPU), prebuilt static lib + translate-c bindings ---
     const wgpu_module = b.createModule(.{
         .root_source_file = b.path("vendor/wgpu.zig"),

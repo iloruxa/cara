@@ -2,6 +2,7 @@ const draw = @import("draw");
 const frame = @import("frame");
 const glfw = @import("glfw");
 const protocol = @import("protocol");
+const staging = @import("staging");
 const std = @import("std");
 
 // Module imports
@@ -192,6 +193,40 @@ pub fn main(init: std.process.Init) !void {
     frame.writeInitialHeader(region);
     std.debug.print("HOST: created {s} ({d} bytes)\n", .{ shm_name, frame.region_size });
 
+    // --- Staging region (the atlas stream): a second shared region created and shared
+    // like the frame region. Capacity must exceed one frame's worst-case glyph additions;
+    // a fixed 8 MiB is ample for now (viewport derived sizing + Resize re-sizing will come later)
+    // The host owns the value and passes it on
+    // = 8 MiB, a power of two
+    const staging_cap: u32 = 8 << 20;
+
+    var staging_name_buf: [64]u8 = undefined;
+    const staging_name = try std.fmt.bufPrintSentinel(&staging_name_buf, "/cara-staging-{d}", .{std.c.getpid()}, 0);
+    _ = std.c.shm_unlink(staging_name.ptr);
+
+    const staging_oflags: std.c.O = .{ .ACCMODE = .RDWR, .CREAT = true };
+    const staging_fd = std.c.shm_open(staging_name.ptr, @bitCast(staging_oflags), @as(c_uint, 0o600));
+
+    if (staging_fd < 0) {
+        std.debug.print("HOST: staging shm_open failed: {s}\n", .{@tagName(std.posix.errno(staging_fd))});
+        return error.ShmOpenFailed;
+    }
+
+    // Teardown on exit (matches the frame region's defensice unlink)
+    defer _ = std.c.shm_unlink(staging_name.ptr);
+
+    if (std.c.ftruncate(staging_fd, @intCast(staging.regionSize(staging_cap))) != 0) {
+        std.debug.print("HOST: staging ftruncate failed\n", .{});
+        return error.FtruncateFailed;
+    }
+
+    const staging_map = try std.posix.mmap(null, staging.regionSize(staging_cap), .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, staging_fd, 0);
+    defer std.posix.munmap(staging_map);
+
+    const staging_region: []align(staging.cache_line) u8 = staging_map;
+    staging.writeInitialHeader(staging_region);
+    std.debug.print("HOST: staging region {s} cap={d} ({d} bytes)\n", .{ staging_name, staging_cap, staging.regionSize(staging_cap) });
+
     // --- Control channel: named Unix socket ---
     var sock_buf: [64]u8 = undefined;
     const sock_path = try std.fmt.bufPrint(&sock_buf, "/tmp/cara-sock-{d}", .{std.c.getpid()});
@@ -207,7 +242,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // --- Spawn renderer engine (shm_name + socket pth) ---
-    spawnRenderer(init.io, init.gpa, shm_name, sock_path) catch |err| {
+    spawnRenderer(init.io, init.gpa, shm_name, sock_path, staging_name, staging_cap) catch |err| {
         std.debug.print("Failed to spawn renderer: {s}\n", .{@errorName(err)});
         return err;
     };
@@ -283,13 +318,16 @@ pub fn main(init: std.process.Init) !void {
     ipc.join();
 }
 
-fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, sock_path: []const u8) !void {
+fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, sock_path: []const u8, staging_name: [:0]const u8, staging_cap: u32) !void {
     const self_dir = try std.process.executableDirPathAlloc(io, gpa);
     defer gpa.free(self_dir);
 
     const renderer_path = try std.fs.path.join(gpa, &.{ self_dir, "cara-renderer" });
     defer gpa.free(renderer_path);
 
-    const argv = [_][]const u8{ renderer_path, shm_name, sock_path };
+    var cap_buf: [16]u8 = undefined;
+    const cap_str = try std.fmt.bufPrint(&cap_buf, "{d}", .{staging_cap});
+
+    const argv = [_][]const u8{ renderer_path, shm_name, sock_path, staging_name, cap_str };
     _ = try std.process.spawn(io, .{ .argv = &argv });
 }
