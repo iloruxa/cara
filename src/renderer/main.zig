@@ -113,32 +113,56 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("RENDERER: staging region OK via {s} cap={d}\n", .{ staging_name, staging_cap });
 
-    // --- Rasterizer, pack and stream one glyph through the atlas stream ---
+    // --- Rasterize, pack and stream one glyph through the atlas stream ---
     const atlas_region = staging.Staging.init(staging_region, staging_cap);
     var atlas_stream = atlas_region.producer();
 
     // atlas dims; the host's atlas texture must match
     var packer = atlas.Packer.init(1024, 1024);
 
-    var rast = raster.Rasterizer.init("assets/fonts/DejaVuSans.ttf", 32) catch |err| {
+    var rast = raster.Rasterizer.init("assets/fonts/DejaVuSans.ttf", 60) catch |err| {
         std.debug.print("RENDERER: rasterizer init failed: {s}\n", .{@errorName(err)});
         return err;
     };
     defer rast.deinit();
 
+    const text = "Cara";
+    var glyphs: [16]draw.PackedGlyph = undefined;
+    var glyph_count: usize = 0;
+    var pen_x: f32 = 100;
+    const baseline_y: f32 = 200;
     var glyph_cov: [256 * 256]u8 = undefined;
-    const g = try rast.rasterize('A', &glyph_cov);
-    const cell = packer.alloc(g.width, g.height) catch |err| {
-        std.debug.print("RENDERER: atlas pack failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
 
-    atlas_stream.push(.{ .atlas_x = cell.x, .atlas_y = cell.y, .width = g.width, .height = g.height }, g.coverage) catch |err| {
-        std.debug.print("RENDERER: atlas push failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    for (text) |ch| {
+        const g = try rast.rasterize(ch, &glyph_cov);
 
-    std.debug.print("RENDERER: streamed glyph 'A' -> atlas ({d},{d}) {d}x{d}\n", .{ cell.x, cell.y, g.width, g.height });
+        if (g.width != 0 and g.height != 0) {
+            const cell = packer.alloc(g.width, g.height) catch |err| {
+                std.debug.print("RENDERER: atlas pack failed: {s}\n", .{@errorName(err)});
+                return err;
+            };
+
+            atlas_stream.push(.{ .atlas_x = cell.x, .atlas_y = cell.y, .width = g.width, .height = g.height }, g.coverage) catch |err| {
+                std.debug.print("RENDERER: atlas push failed: {s}\n", .{@errorName(err)});
+                return err;
+            };
+
+            glyphs[glyph_count] = .{
+                .screen_x = pen_x + @as(f32, @floatFromInt(g.bearing_x)),
+                .screen_y = baseline_y - @as(f32, @floatFromInt(g.bearing_y)),
+                .atlas_x = @intCast(cell.x),
+                .atlas_y = @intCast(cell.y),
+                .atlas_w = @intCast(g.width),
+                .atlas_h = @intCast(g.height),
+            };
+
+            glyph_count += 1;
+        }
+
+        pen_x += @as(f32, @floatFromInt(g.advance));
+    }
+
+    std.debug.print("RENDERER: laid out \"{s}\" -> {d} glyphs\n", .{ text, glyph_count });
 
     const uaddr = try net.UnixAddress.init(sock_path);
     const control = try uaddr.connect(init.io);
@@ -153,6 +177,11 @@ pub fn main(init: std.process.Init) !void {
 
     var cmd_buf: [4096]u8 align(8) = undefined;
     var enc = draw.Encoder{ .buf = &cmd_buf };
+
+    enc.textRun(0xFFFFFFFF, glyphs[0..glyph_count]) catch |err| {
+        std.debug.print("RENDERER: textRun encode failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
 
     const rect = draw.DrawRect{ .x = 32, .y = 48, .w = 240, .h = 120, .rgba = 0x3B82F6FF };
 

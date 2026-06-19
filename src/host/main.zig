@@ -275,6 +275,9 @@ pub fn main(init: std.process.Init) !void {
     // needs_repaint starts true and is re-armed by expose/resize so the frame is (re)presented
     // once window is genuinely on screen, not just once as it appears
     var held: ?draw.DrawRect = null;
+    var held_glyphs: [256]draw.PackedGlyph = undefined;
+    var held_count: usize = 0;
+    var held_color: u32 = 0xFFFFFFFF;
 
     // Wakes on OS events and on FrameReady (posted by the IPC thread).
     // We paint only when a new frame is taken
@@ -291,7 +294,8 @@ pub fn main(init: std.process.Init) !void {
             // GPU upload comes next
             while (atlas_consumer.pop(&glyph_cov) catch null) |drained| {
                 gpu.uploadGlyph(drained.entry.atlas_x, drained.entry.atlas_y, drained.entry.width, drained.entry.height, drained.coverage);
-                std.debug.print("HOST: drained atlas glyph at ({d},{d}) {d}x{d} len={d}\n", .{ drained.entry.atlas_x, drained.entry.atlas_y, drained.entry.width, drained.entry.height, drained.coverage.len });
+                // held_glyphs[0] = .{ .screen_x = 500, .screen_y = 400, .atlas_x = @intCast(drained.entry.atlas_x), .atlas_y = @intCast(drained.entry.atlas_y), .atlas_w = @intCast(drained.entry.width), .atlas_h = @intCast(drained.entry.height) };
+                // held_count = 1;
             }
 
             var cmds = draw.Iterator{ .buf = fr.commands };
@@ -303,6 +307,13 @@ pub fn main(init: std.process.Init) !void {
                             const r: *const draw.DrawRect = @ptrCast(@alignCast(cmd.payload.ptr));
                             held = r.*;
                         } else std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{cmd.payload.len});
+                    },
+                    .text_run => {
+                        if (draw.parseTextRun(cmd.payload)) |run| {
+                            held_count = @min(run.glyphs.len, held_glyphs.len);
+                            @memcpy(held_glyphs[0..held_count], run.glyphs[0..held_count]);
+                            held_color = run.rgba;
+                        } else std.debug.print("HOST: malformed text run\n", .{});
                     },
                     else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ @intFromEnum(cmd.tag), cmd.payload.len }),
                 }
@@ -317,7 +328,7 @@ pub fn main(init: std.process.Init) !void {
         // keep the flag set and wake ourselves so we retry on the next pump,
         // until it is on screen
         if (click_ctx.needs_repaint) {
-            if (gpu.paint(held)) {
+            if (gpu.paint(held, held_glyphs[0..held_count], held_color)) {
                 click_ctx.needs_repaint = false;
             } else {
                 glfw.glfwPostEmptyEvent();
