@@ -29,6 +29,9 @@ pub const NodeKind = enum(u8) {
     root,
     box,
     text,
+    button,
+    image,
+    component,
     _,
 };
 
