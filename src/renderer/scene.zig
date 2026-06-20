@@ -7,6 +7,8 @@
 //! detectably stale (hit-test safety); Fixed capacity for now
 
 const std = @import("std");
+const style_mod = @import("style.zig");
+pub const Style = style_mod.Style;
 
 pub const max_entities = 4096;
 const none_index: u24 = std.math.maxInt(u24);
@@ -61,6 +63,7 @@ pub const Scene = struct {
     last_child: [max_entities]Entity,
     next_sibling: [max_entities]Entity,
     dirty: [max_entities]DirtyFlags,
+    style: [max_entities]Style,
 
     // slots ever handed out
     high_water: u24,
@@ -96,6 +99,7 @@ pub const Scene = struct {
         self.last_child[idx] = Entity.none;
         self.next_sibling[idx] = Entity.none;
         self.dirty[idx] = .{};
+        self.style[idx] = .{};
 
         return .{ .index = idx, .generation = self.generation[idx] };
     }

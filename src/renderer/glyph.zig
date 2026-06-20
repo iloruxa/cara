@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const scene_mod = @import("scene.zig");
+const style = @import("style.zig");
 
 const Scene = scene_mod.Scene;
 const Entity = scene_mod.Entity;
@@ -220,7 +221,11 @@ pub const Parser = struct {
         while (true) {
             switch (self.cur.tag) {
                 // style
-                .utility => self.advance(),
+                .utility => {
+                    _ = style.resolve(&self.scene.style[entity.index], self.cur.text);
+
+                    self.advance();
+                },
 
                 // id attr
                 .hash_id => self.advance(),
@@ -363,4 +368,29 @@ test "unclosed block is a parse error" {
     s.init();
     var p = Parser.init("box { text \"hi\"", s);
     try testing.expectError(error.UnexpectedEof, p.parse());
+}
+
+test "utilities resolve onto entity style during parse" {
+    const s = try testing.allocator.create(Scene);
+    defer testing.allocator.destroy(s);
+    s.init();
+
+    var p = Parser.init(
+        \\box .flow-row .bg-gray-900 .p-4 .w-full {
+        \\    text .text-xl .text-blue-500 "Hi"
+        \\}
+    , s);
+    const root = try p.parse();
+
+    var rc = s.children(root);
+    const box = rc.next().?;
+    try testing.expectEqual(style.Flow.row, s.style[box.index].flow);
+    try testing.expectEqual(@as(u32, 0x111827FF), s.style[box.index].bg);
+    try testing.expectEqual(@as(f32, 16), s.style[box.index].padding);
+    try testing.expectEqual(style.SizeMode.fill, s.style[box.index].width_mode);
+
+    var bc = s.children(box);
+    const t = bc.next().?;
+    try testing.expectEqual(@as(u32, 48), s.style[t.index].font_px);
+    try testing.expectEqual(@as(u32, 0x3B82F6FF), s.style[t.index].fg);
 }
