@@ -34,6 +34,7 @@ pub const NodeKind = enum(u8) {
     button,
     image,
     component,
+    span,
     _,
 };
 
@@ -45,6 +46,25 @@ pub const DirtyFlags = packed struct {
     paint: bool = true,
     _pad: u5 = 0,
 };
+
+/// Markdown modifiers for a styled text span
+/// A register-resident u32 bitmask: opening a token sets a bit
+/// closing clears it, emiting a span copies the mask
+/// No nesting stack by desing
+pub const Mask = packed struct {
+    bold: bool = false,
+    italic: bool = false,
+    strikethrough: bool = false,
+    code: bool = false,
+    link: bool = false,
+    _pad: u27 = 0,
+};
+
+/// A styled text span
+/// A slice of content + its mask (+url when it is a link)
+/// Slices point into the source (zero-copy);
+/// the parse keeps the source alive
+pub const SpanData = struct { text: []const u8 = "", url: []const u8 = "", mask: Mask = .{} };
 
 comptime {
     std.debug.assert(@sizeOf(Entity) == 4);
@@ -64,6 +84,7 @@ pub const Scene = struct {
     next_sibling: [max_entities]Entity,
     dirty: [max_entities]DirtyFlags,
     style: [max_entities]Style,
+    span: [max_entities]SpanData,
 
     // slots ever handed out
     high_water: u24,
@@ -100,6 +121,7 @@ pub const Scene = struct {
         self.next_sibling[idx] = Entity.none;
         self.dirty[idx] = .{};
         self.style[idx] = .{};
+        self.span[idx] = .{};
 
         return .{ .index = idx, .generation = self.generation[idx] };
     }

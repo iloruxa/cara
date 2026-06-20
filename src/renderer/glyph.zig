@@ -10,6 +10,7 @@ const style = @import("style.zig");
 const Scene = scene_mod.Scene;
 const Entity = scene_mod.Entity;
 const NodeKind = scene_mod.NodeKind;
+const Mask = scene_mod.Mask;
 
 pub const Token = struct {
     tag: Tag,
@@ -266,6 +267,7 @@ pub const Parser = struct {
             self.advance();
         } else if (self.cur.tag == .string) {
             // content (markdown-desugaring)
+            try desugar(self.scene, entity, self.cur.text, self.cur.triple_quoted);
             self.advance();
         }
 
@@ -284,6 +286,127 @@ fn kindOf(name: []const u8) NodeKind {
 
     // Unknown lowercase primitive: treat as a box for now
     return .box;
+}
+
+// --- Markdown desugaring: a content string -> flat styled span entities ---
+fn emitRun(sc: *Scene, parent: Entity, text: []const u8, mask: Mask) Scene.Error!void {
+    // adjacent toggles can leave empty runs, skip them
+    if (text.len == 0) return;
+
+    const e = try sc.create(.span);
+    sc.span[e.index] = .{ .text = text, .mask = mask };
+    sc.appendChild(parent, e);
+}
+
+fn emitLink(sc: *Scene, parent: Entity, text: []const u8, url: []const u8, mask: Mask) Scene.Error!void {
+    var m = mask;
+    m.link = true;
+    const e = try sc.create(.span);
+    sc.span[e.index] = .{ .text = text, .url = url, .mask = m };
+    sc.appendChild(parent, e);
+}
+
+const Link = struct { text: []const u8, url: []const u8, end: usize };
+
+/// Match `[text](url)` starting at `open` (where content[open] == '[')
+/// * Returns null on any malformed shape, so the caller treats '[' as a literal char
+fn parseLink(content: []const u8, open: usize) ?Link {
+    const close_text = std.mem.findScalarPos(u8, content, open + 1, ']') orelse return null;
+
+    if (close_text + 1 >= content.len or content[close_text + 1] != '(') return null;
+
+    const url_start = close_text + 2;
+    const close_url = std.mem.findScalarPos(u8, content, url_start, ')') orelse return null;
+
+    return .{
+        .text = content[open + 1 .. close_text],
+        .url = content[url_start..close_url],
+        .end = close_url + 1,
+    };
+}
+
+/// Desugar one content string into span children of `parent`
+/// Triple-quoted strings opt out (one plain span)
+/// State is a u32 mask, never a stack: a run is flushed before each toggle
+/// A '\' escape emits the next char as its own 1-char span
+/// which keeps every span a direct slice (zero-alloc) at the cost of
+/// a few extra spans for escaped characters
+pub fn desugar(sc: *Scene, parent: Entity, content: []const u8, triple_quoted: bool) Scene.Error!void {
+    if (triple_quoted) {
+        try emitRun(sc, parent, content, .{});
+        return;
+    }
+
+    var mask = Mask{};
+    var run_start: usize = 0;
+    var i: usize = 0;
+
+    while (i < content.len) {
+        switch (content[i]) {
+            '\\' => {
+                if (i + 1 < content.len) {
+                    try emitRun(sc, parent, content[run_start..i], mask);
+                    // escaped char, literal
+                    try emitRun(sc, parent, content[i + 1 .. i + 2], mask);
+                    i += 2;
+                    run_start = i;
+                } else {
+                    // trailing backslash: leave it in the run
+                    i += 1;
+                }
+            },
+            '*' => {
+                try emitRun(sc, parent, content[run_start..i], mask);
+
+                if (i + 1 < content.len and content[i + 1] == '*') {
+                    mask.bold = !mask.bold;
+                    i += 2;
+                } else {
+                    mask.italic = !mask.italic;
+                    i += 1;
+                }
+
+                run_start = i;
+            },
+            '_' => {
+                try emitRun(sc, parent, content[run_start..i], mask);
+                mask.italic = !mask.italic;
+                i += 1;
+                run_start = i;
+            },
+            '~' => {
+                if (i + 1 < content.len and content[i + 1] == '~') {
+                    try emitRun(sc, parent, content[run_start..i], mask);
+                    mask.strikethrough = !mask.strikethrough;
+                    i += 2;
+                    run_start = i;
+                } else {
+                    // a single '~' is a literal char
+                    i += 1;
+                }
+            },
+            '`' => {
+                try emitRun(sc, parent, content[run_start..i], mask);
+                mask.code = !mask.code;
+                i += 1;
+                run_start = i;
+            },
+            '[' => {
+                if (parseLink(content, i)) |lnk| {
+                    try emitRun(sc, parent, content[run_start..i], mask);
+                    try emitLink(sc, parent, lnk.text, lnk.url, mask);
+                    i = lnk.end;
+                    run_start = i;
+                } else {
+                    // not a well-formed link: '[' is literal
+                    i += 1;
+                }
+            },
+            else => i += 1,
+        }
+    }
+
+    try emitRun(sc, parent, content[run_start..content.len], mask);
 }
 
 // --- Tests ---
@@ -393,4 +516,71 @@ test "utilities resolve onto entity style during parse" {
     const t = bc.next().?;
     try testing.expectEqual(@as(u32, 48), s.style[t.index].font_px);
     try testing.expectEqual(@as(u32, 0x3B82F6FF), s.style[t.index].fg);
+}
+
+test "content desugars into flat styled spans" {
+    const s = try testing.allocator.create(Scene);
+    defer testing.allocator.destroy(s);
+    s.init();
+
+    var p = Parser.init("text \"Click **here** to read the [docs](/docs).\"", s);
+    const root = try p.parse();
+    var rc = s.children(root);
+    const t = rc.next().?;
+
+    var spans = s.children(t);
+    const s0 = spans.next().?;
+    const s1 = spans.next().?;
+    const s2 = spans.next().?;
+    const s3 = spans.next().?;
+    const s4 = spans.next().?;
+    try testing.expect(spans.next() == null); // exactly five
+
+    try testing.expectEqualStrings("Click ", s.span[s0.index].text);
+    try testing.expect(!s.span[s0.index].mask.bold);
+    try testing.expectEqualStrings("here", s.span[s1.index].text);
+    try testing.expect(s.span[s1.index].mask.bold);
+    try testing.expectEqualStrings(" to read the ", s.span[s2.index].text);
+    try testing.expectEqualStrings("docs", s.span[s3.index].text);
+    try testing.expect(s.span[s3.index].mask.link);
+    try testing.expectEqualStrings("/docs", s.span[s3.index].url);
+    try testing.expectEqualStrings(".", s.span[s4.index].text);
+}
+
+test "triple-quoted content is one plain span, markdown not interpreted" {
+    const s = try testing.allocator.create(Scene);
+    defer testing.allocator.destroy(s);
+    s.init();
+
+    var p = Parser.init("text \"\"\"raw **stars** kept\"\"\"", s);
+    const root = try p.parse();
+    var rc = s.children(root);
+    const t = rc.next().?;
+    var spans = s.children(t);
+    const only = spans.next().?;
+    try testing.expect(spans.next() == null);
+    try testing.expectEqualStrings("raw **stars** kept", s.span[only.index].text);
+    try testing.expect(!s.span[only.index].mask.bold);
+}
+
+test "backslash escapes the next char (literal, not a marker)" {
+    const s = try testing.allocator.create(Scene);
+    defer testing.allocator.destroy(s);
+    s.init();
+
+    var p = Parser.init("text \"a\\*b\"", s); // source content: a\*b
+    const root = try p.parse();
+    var rc = s.children(root);
+    const t = rc.next().?;
+
+    var buf: [8]u8 = undefined;
+    var n: usize = 0;
+    var spans = s.children(t);
+    while (spans.next()) |sp| {
+        const txt = s.span[sp.index].text;
+        @memcpy(buf[n .. n + txt.len], txt);
+        n += txt.len;
+        try testing.expect(!s.span[sp.index].mask.italic); // the '*' was escaped, no italic
+    }
+    try testing.expectEqualStrings("a*b", buf[0..n]);
 }
