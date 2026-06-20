@@ -66,6 +66,15 @@ pub const Mask = packed struct {
 /// the parse keeps the source alive
 pub const SpanData = struct { text: []const u8 = "", url: []const u8 = "", mask: Mask = .{} };
 
+/// An entity's laid-out box: absolute origin + size in framebuffer pixels,
+/// written by the layout pass, read by paint
+pub const Box = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+};
+
 comptime {
     std.debug.assert(@sizeOf(Entity) == 4);
     std.debug.assert(@sizeOf(DirtyFlags) == 1);
@@ -85,6 +94,7 @@ pub const Scene = struct {
     dirty: [max_entities]DirtyFlags,
     style: [max_entities]Style,
     span: [max_entities]SpanData,
+    box: [max_entities]Box,
 
     // slots ever handed out
     high_water: u24,
@@ -122,6 +132,7 @@ pub const Scene = struct {
         self.dirty[idx] = .{};
         self.style[idx] = .{};
         self.span[idx] = .{};
+        self.box[idx] = .{};
 
         return .{ .index = idx, .generation = self.generation[idx] };
     }
