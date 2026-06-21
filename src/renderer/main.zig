@@ -6,6 +6,10 @@ const raster = @import("raster.zig");
 const protocol = @import("protocol");
 const shaper = @import("shaper.zig");
 const staging = @import("staging");
+const scene_mod = @import("scene.zig");
+const glyph = @import("glyph.zig");
+const layout = @import("layout.zig");
+const paint = @import("paint.zig");
 
 // Dependent imports
 const net = std.Io.net;
@@ -129,6 +133,32 @@ pub fn main(init: std.process.Init) !void {
 
     var sh = shaper.Shaper.init(&rast, &packer, &atlas_stream);
 
+    // --- Build the page: parse Glyph -> scene, then style (in parse), layout ---
+    const page_src =
+        \\box .bg-blue-500 .p-4 {
+        \\    text .text-2xl .text-white "Hello Cara"
+        \\}
+    ;
+
+    const scene_ptr = try init.gpa.create(scene_mod.Scene);
+    defer init.gpa.destroy(scene_ptr);
+    scene_ptr.init();
+
+    var parser = glyph.Parser.init(page_src, scene_ptr);
+    const root = parser.parse() catch |err| {
+        std.debug.print("RENDERER: parse failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    var lay = layout.Layout{
+        .scene = scene_ptr,
+        .measurer = paint.measurer(&sh),
+    };
+
+    // framebuffer-pixel viewport
+    // TODO: Host to supply thi via Resize later
+    lay.run(root, 2048, 1536);
+
     const uaddr = try net.UnixAddress.init(sock_path);
     const control = try uaddr.connect(init.io);
     defer control.close(init.io);
@@ -140,18 +170,17 @@ pub fn main(init: std.process.Init) !void {
     const frames = frame.Frames.init(region);
     var producer = frames.producer();
 
-    var cmd_buf: [4096]u8 align(8) = undefined;
+    var cmd_buf: [64 * 1024]u8 align(8) = undefined;
     var enc = draw.Encoder{ .buf = &cmd_buf };
 
-    sh.shapeInto(&enc, "Cara", 60, 0xFFFFFFFF, 100, 200) catch |err| {
-        std.debug.print("RENDERER: shapeInto failed: {s}\n", .{@errorName(err)});
-        return err;
+    var painter = paint.Painter{
+        .scene = scene_ptr,
+        .shaper = &sh,
+        .enc = &enc,
     };
 
-    const rect = draw.DrawRect{ .x = 32, .y = 48, .w = 240, .h = 120, .rgba = 0x3B82F6FF };
-
-    enc.command(.rect, rect) catch |err| {
-        std.debug.print("RENDERER: encode failed: {s}\n", .{@errorName(err)});
+    painter.paint(root) catch |err| {
+        std.debug.print("RENDERER: paint failed: {s}\n", .{@errorName(err)});
         return err;
     };
 

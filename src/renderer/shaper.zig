@@ -118,6 +118,23 @@ pub const Shaper = struct {
         return cg;
     }
 
+    /// Sum advances for `run` at `font_px` - for layout's text measurement
+    pub fn measure(self: *Shaper, run: []const u8, font_px: u32) !Size {
+        try self.rast.setPixelSize(font_px);
+
+        var w: f32 = 0;
+
+        for (run) |ch| {
+            const cg = try self.glyph(ch, font_px);
+            w += @as(f32, @floatFromInt(cg.advance));
+        }
+
+        return .{
+            .w = w,
+            .h = @as(f32, @floatFromInt(font_px)),
+        };
+    }
+
     /// Append one DrawTextRun for `run`, pen starting at (pen_x, baseline_y)
     pub fn shapeInto(self: *Shaper, enc: *draw.Encoder, run: []const u8, font_px: u32, rgba: u32, pen_x: f32, baseline_y: f32) !void {
         try self.rast.setPixelSize(font_px);
