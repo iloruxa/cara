@@ -105,7 +105,7 @@ const glyph_wgsl =
     \\struct FsOut { @location(0) color: vec4<f32>, @location(1) id: u32, }
     \\@fragment fn fs(in: VsOut) -> FsOut {
     \\    let cov = textureLoad(atlas_tex, vec2<i32>(in.texel), 0).r;
-    \\    return FsOut(vec4<f32>(u.color.rgb *cov, 1.0), 0u);
+    \\    return FsOut(vec4<f32>(u.color.rgb, cov), 0u);
     \\}
 ;
 
@@ -164,8 +164,21 @@ fn createGlyphPainter(device: wgpu.WGPUDevice, atlas_view: wgpu.WGPUTextureView)
         },
     };
 
+    const glyph_blend = wgpu.WGPUBlendState{
+        .color = .{
+            .operation = @intCast(wgpu.WGPUBlendOperation_Add),
+            .srcFactor = @intCast(wgpu.WGPUBlendFactor_SrcAlpha),
+            .dstFactor = @intCast(wgpu.WGPUBlendFactor_OneMinusSrcAlpha),
+        },
+        .alpha = .{
+            .operation = @intCast(wgpu.WGPUBlendOperation_Add),
+            .srcFactor = @intCast(wgpu.WGPUBlendFactor_One),
+            .dstFactor = @intCast(wgpu.WGPUBlendFactor_OneMinusSrcAlpha),
+        },
+    };
+
     const targets = [_]wgpu.WGPUColorTargetState{
-        .{ .format = @intCast(wgpu.WGPUTextureFormat_BGRA8Unorm), .writeMask = wgpu.WGPUColorWriteMask_All },
+        .{ .format = @intCast(wgpu.WGPUTextureFormat_BGRA8Unorm), .blend = &glyph_blend, .writeMask = wgpu.WGPUColorWriteMask_All },
         .{ .format = @intCast(wgpu.WGPUTextureFormat_R32Uint), .writeMask = wgpu.WGPUColorWriteMask_All },
     };
 
@@ -513,10 +526,7 @@ pub const Gpu = struct {
                 insts[i] = .{ .screen_x = gl.screen_x, .screen_y = gl.screen_y, .atlas_x = @floatFromInt(gl.atlas_x), .atlas_y = @floatFromInt(gl.atlas_y), .atlas_w = @floatFromInt(gl.atlas_w), .atlas_h = @floatFromInt(gl.atlas_h) };
             }
 
-            std.debug.print("GPU: glyph draw n={d} screen=({d},{d}) atlas=({d},{d}) {d}x{d} vp=({d},{d})\n", .{ n, insts[0].screen_x, insts[0].screen_y, insts[0].atlas_x, insts[0].atlas_y, insts[0].atlas_w, insts[0].atlas_h, self.fb_w, self.fb_h });
-
             wgpu.wgpuQueueWriteBuffer(self.queue, self.glyph.instances, 0, &insts, n * glyph_instance_size);
-
             wgpu.wgpuRenderPassEncoderSetScissorRect(pass, 0, 0, self.fb_w, self.fb_h);
             wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.glyph.pipeline);
             wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.glyph.bind_group, 0, null);

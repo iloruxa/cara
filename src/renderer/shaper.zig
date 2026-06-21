@@ -93,9 +93,6 @@ pub const Shaper = struct {
 
         const g = try self.rast.rasterize(codepoint, &self.cov);
 
-        // TODO: Remove after verifying cache
-        std.debug.print("SHAPER: streamed glyph cp={d} size={d}\n", .{ codepoint, font_px });
-
         var cg = CachedGlyph{
             .bearing_x = g.bearing_x,
             .bearing_y = g.bearing_y,
