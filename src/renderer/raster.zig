@@ -95,4 +95,8 @@ pub const Rasterizer = struct {
             .coverage = out[0..len],
         };
     }
+
+    pub fn setPixelSize(self: *Rasterizer, px: u32) Error!void {
+        if (ft.FT_Set_Pixel_Sizes(self.face, 0, @intCast(px)) != 0) return error.SetSize;
+    }
 };

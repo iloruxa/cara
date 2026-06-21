@@ -1,10 +1,11 @@
+const std = @import("std");
 const atlas = @import("atlas.zig");
 const draw = @import("draw");
 const frame = @import("frame");
 const raster = @import("raster.zig");
 const protocol = @import("protocol");
+const shaper = @import("shaper.zig");
 const staging = @import("staging");
-const std = @import("std");
 
 // Dependent imports
 const net = std.Io.net;
@@ -126,43 +127,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer rast.deinit();
 
-    const text = "Cara";
-    var glyphs: [16]draw.PackedGlyph = undefined;
-    var glyph_count: usize = 0;
-    var pen_x: f32 = 100;
-    const baseline_y: f32 = 200;
-    var glyph_cov: [256 * 256]u8 = undefined;
-
-    for (text) |ch| {
-        const g = try rast.rasterize(ch, &glyph_cov);
-
-        if (g.width != 0 and g.height != 0) {
-            const cell = packer.alloc(g.width, g.height) catch |err| {
-                std.debug.print("RENDERER: atlas pack failed: {s}\n", .{@errorName(err)});
-                return err;
-            };
-
-            atlas_stream.push(.{ .atlas_x = cell.x, .atlas_y = cell.y, .width = g.width, .height = g.height }, g.coverage) catch |err| {
-                std.debug.print("RENDERER: atlas push failed: {s}\n", .{@errorName(err)});
-                return err;
-            };
-
-            glyphs[glyph_count] = .{
-                .screen_x = pen_x + @as(f32, @floatFromInt(g.bearing_x)),
-                .screen_y = baseline_y - @as(f32, @floatFromInt(g.bearing_y)),
-                .atlas_x = @intCast(cell.x),
-                .atlas_y = @intCast(cell.y),
-                .atlas_w = @intCast(g.width),
-                .atlas_h = @intCast(g.height),
-            };
-
-            glyph_count += 1;
-        }
-
-        pen_x += @as(f32, @floatFromInt(g.advance));
-    }
-
-    std.debug.print("RENDERER: laid out \"{s}\" -> {d} glyphs\n", .{ text, glyph_count });
+    var sh = shaper.Shaper.init(&rast, &packer, &atlas_stream);
 
     const uaddr = try net.UnixAddress.init(sock_path);
     const control = try uaddr.connect(init.io);
@@ -178,8 +143,8 @@ pub fn main(init: std.process.Init) !void {
     var cmd_buf: [4096]u8 align(8) = undefined;
     var enc = draw.Encoder{ .buf = &cmd_buf };
 
-    enc.textRun(0xFFFFFFFF, glyphs[0..glyph_count]) catch |err| {
-        std.debug.print("RENDERER: textRun encode failed: {s}\n", .{@errorName(err)});
+    sh.shapeInto(&enc, "Cara", 60, 0xFFFFFFFF, 100, 200) catch |err| {
+        std.debug.print("RENDERER: shapeInto failed: {s}\n", .{@errorName(err)});
         return err;
     };
 
