@@ -7,6 +7,7 @@ const std = @import("std");
 
 // Module imports
 const Gpu = @import("gpu.zig").Gpu;
+const GlyphInstance = @import("gpu.zig").GlyphInstance;
 
 // Dependent imports
 const net = std.Io.net;
@@ -275,9 +276,8 @@ pub fn main(init: std.process.Init) !void {
     // needs_repaint starts true and is re-armed by expose/resize so the frame is (re)presented
     // once window is genuinely on screen, not just once as it appears
     var held: ?draw.DrawRect = null;
-    var held_glyphs: [256]draw.PackedGlyph = undefined;
-    var held_count: usize = 0;
-    var held_color: u32 = 0xFFFFFFFF;
+    var glyph_instances: [4096]GlyphInstance = undefined;
+    var gi_count: usize = 0;
 
     // Wakes on OS events and on FrameReady (posted by the IPC thread).
     // We paint only when a new frame is taken
@@ -289,6 +289,8 @@ pub fn main(init: std.process.Init) !void {
         if (consumer.take()) |slot| {
             const fr = frame.parse(slot);
             click_ctx.frame_seq = fr.header.seq;
+            held = null;
+            gi_count = 0;
 
             // Drain the atlas stream to head (atlas_head_required is the floor)
             // GPU upload comes next
@@ -310,9 +312,21 @@ pub fn main(init: std.process.Init) !void {
                     },
                     .text_run => {
                         if (draw.parseTextRun(cmd.payload)) |run| {
-                            held_count = @min(run.glyphs.len, held_glyphs.len);
-                            @memcpy(held_glyphs[0..held_count], run.glyphs[0..held_count]);
-                            held_color = run.rgba;
+                            for (run.glyphs) |gl| {
+                                if (gi_count == glyph_instances.len) break;
+
+                                glyph_instances[gi_count] = .{
+                                    .screen_x = gl.screen_x,
+                                    .screen_y = gl.screen_y,
+                                    .atlas_x = @floatFromInt(gl.atlas_x),
+                                    .atlas_y = @floatFromInt(gl.atlas_y),
+                                    .atlas_w = @floatFromInt(gl.atlas_w),
+                                    .atlas_h = @floatFromInt(gl.atlas_h),
+                                    .rgba = run.rgba,
+                                };
+
+                                gi_count += 1;
+                            }
                         } else std.debug.print("HOST: malformed text run\n", .{});
                     },
                     else => std.debug.print("HOST: unknown command tag={d} ({d} bytes)\n", .{ @intFromEnum(cmd.tag), cmd.payload.len }),
@@ -328,7 +342,7 @@ pub fn main(init: std.process.Init) !void {
         // keep the flag set and wake ourselves so we retry on the next pump,
         // until it is on screen
         if (click_ctx.needs_repaint) {
-            if (gpu.paint(held, held_glyphs[0..held_count], held_color)) {
+            if (gpu.paint(held, glyph_instances[0..gi_count])) {
                 click_ctx.needs_repaint = false;
             } else {
                 glfw.glfwPostEmptyEvent();

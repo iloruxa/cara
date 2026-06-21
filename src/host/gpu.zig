@@ -80,15 +80,20 @@ const rect_wgsl =
 ;
 
 const glyph_wgsl =
-    \\struct Uniforms { viewport: vec2<f32>, color: vec4<f32>, }
+    \\struct Uniforms { viewport: vec2<f32>, }
     \\@group(0) @binding(0) var<uniform> u: Uniforms;
     \\@group(0) @binding(1) var atlas_tex: texture_2d<f32>;
-    \\struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) texel: vec2<f32>, }
+    \\struct VsOut {
+    \\    @builtin(position) pos: vec4<f32>,
+    \\    @location(0) texel: vec2<f32>,
+    \\    @location(1) color: vec4<f32>,
+    \\}
     \\@vertex fn vs(
     \\    @builtin(vertex_index) vi: u32,
     \\    @location(0) screen: vec2<f32>,
     \\    @location(1) atlas_xy: vec2<f32>,
     \\    @location(2) atlas_wh: vec2<f32>,
+    \\    @location(3) rgba: u32,
     \\) -> VsOut {
     \\    var corner = array<vec2<f32>, 6>(
     \\        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
@@ -100,12 +105,18 @@ const glyph_wgsl =
     \\    var out: VsOut;
     \\    out.pos = vec4<f32>(clip, 0.0, 1.0);
     \\    out.texel = atlas_xy + c * atlas_wh;
+    \\    out.color = vec4<f32>(
+    \\        f32((rgba >> 24u) & 255u) / 255.0,
+    \\        f32((rgba >> 16u) & 255u) / 255.0,
+    \\        f32((rgba >> 8u) & 255u) / 255.0,
+    \\        f32(rgba & 255u) / 255.0,
+    \\    );
     \\    return out;
     \\}
     \\struct FsOut { @location(0) color: vec4<f32>, @location(1) id: u32, }
     \\@fragment fn fs(in: VsOut) -> FsOut {
     \\    let cov = textureLoad(atlas_tex, vec2<i32>(in.texel), 0).r;
-    \\    return FsOut(vec4<f32>(u.color.rgb, cov), 0u);
+    \\    return FsOut(vec4<f32>(in.color.rgb, in.color.a * cov), 0u);
     \\}
 ;
 
@@ -122,18 +133,19 @@ const RectPainter = struct {
     bind_group: wgpu.WGPUBindGroup,
 };
 
-const GlyphInstance = extern struct {
+pub const GlyphInstance = extern struct {
     screen_x: f32,
     screen_y: f32,
     atlas_x: f32,
     atlas_y: f32,
     atlas_w: f32,
     atlas_h: f32,
+    rgba: u32,
 };
 
-// = 24
+// = 28
 const glyph_instance_size = @sizeOf(GlyphInstance);
-const max_glyphs = 256;
+const max_glyphs = 4096;
 
 const GlyphPainter = struct {
     pipeline: wgpu.WGPURenderPipeline,
@@ -153,6 +165,7 @@ fn createGlyphPainter(device: wgpu.WGPUDevice, atlas_view: wgpu.WGPUTextureView)
         .{ .format = @intCast(wgpu.WGPUVertexFormat_Float32x2), .offset = 0, .shaderLocation = 0 },
         .{ .format = @intCast(wgpu.WGPUVertexFormat_Float32x2), .offset = 8, .shaderLocation = 1 },
         .{ .format = @intCast(wgpu.WGPUVertexFormat_Float32x2), .offset = 16, .shaderLocation = 2 },
+        .{ .format = @intCast(wgpu.WGPUVertexFormat_Uint32), .offset = 24, .shaderLocation = 3 },
     };
 
     const vbufs = [_]wgpu.WGPUVertexBufferLayout{
@@ -458,7 +471,7 @@ pub const Gpu = struct {
     // --- per-frame paint: clear, then the rect (scissor-clipped) ---
     // * Returns true if it presented; false if the surface had no drawable yet
     // helps the caller to retry
-    pub fn paint(self: *Gpu, rect: ?draw.DrawRect, glyphs: []const draw.PackedGlyph, text_rgba: u32) bool {
+    pub fn paint(self: *Gpu, rect: ?draw.DrawRect, glyphs: []const GlyphInstance) bool {
         var st: wgpu.WGPUSurfaceTexture = undefined;
         wgpu.wgpuSurfaceGetCurrentTexture(self.surface, &st);
 
@@ -511,22 +524,14 @@ pub const Gpu = struct {
         }
 
         if (glyphs.len > 0) {
-            const cr: f32 = @floatFromInt((text_rgba >> 24) & 0xFF);
-            const cg: f32 = @floatFromInt((text_rgba >> 16) & 0xFF);
-            const cb: f32 = @floatFromInt((text_rgba >> 8) & 0xFF);
-            const ca: f32 = @floatFromInt(text_rgba & 0xFF);
-            const ubuf = [8]f32{ @floatFromInt(self.fb_w), @floatFromInt(self.fb_h), 0, 0, cr / 255.0, cg / 255.0, cb / 255.0, ca / 255.0 };
+            const vp = [2]f32{ @floatFromInt(self.fb_w), @floatFromInt(self.fb_h) };
 
-            wgpu.wgpuQueueWriteBuffer(self.queue, self.glyph.uniforms, 0, &ubuf, @sizeOf(@TypeOf(ubuf)));
+            wgpu.wgpuQueueWriteBuffer(self.queue, self.glyph.uniforms, 0, &vp, @sizeOf(@TypeOf(vp)));
 
-            var insts: [max_glyphs]GlyphInstance = undefined;
-            const n = @min(glyphs.len, insts.len);
+            const n = @min(glyphs.len, max_glyphs);
 
-            for (glyphs[0..n], 0..) |gl, i| {
-                insts[i] = .{ .screen_x = gl.screen_x, .screen_y = gl.screen_y, .atlas_x = @floatFromInt(gl.atlas_x), .atlas_y = @floatFromInt(gl.atlas_y), .atlas_w = @floatFromInt(gl.atlas_w), .atlas_h = @floatFromInt(gl.atlas_h) };
-            }
+            wgpu.wgpuQueueWriteBuffer(self.queue, self.glyph.instances, 0, @ptrCast(glyphs.ptr), n * glyph_instance_size);
 
-            wgpu.wgpuQueueWriteBuffer(self.queue, self.glyph.instances, 0, &insts, n * glyph_instance_size);
             wgpu.wgpuRenderPassEncoderSetScissorRect(pass, 0, 0, self.fb_w, self.fb_h);
             wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.glyph.pipeline);
             wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.glyph.bind_group, 0, null);
