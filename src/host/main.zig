@@ -8,6 +8,7 @@ const std = @import("std");
 // Module imports
 const Gpu = @import("gpu.zig").Gpu;
 const GlyphInstance = @import("gpu.zig").GlyphInstance;
+const RectInstance = @import("gpu.zig").RectInstance;
 
 // Dependent imports
 const net = std.Io.net;
@@ -275,7 +276,8 @@ pub fn main(init: std.process.Init) !void {
     // The held display list.
     // needs_repaint starts true and is re-armed by expose/resize so the frame is (re)presented
     // once window is genuinely on screen, not just once as it appears
-    var held: ?draw.DrawRect = null;
+    var rect_instances: [1024]RectInstance = undefined;
+    var rect_count: usize = 0;
     var glyph_instances: [4096]GlyphInstance = undefined;
     var gi_count: usize = 0;
 
@@ -289,7 +291,7 @@ pub fn main(init: std.process.Init) !void {
         if (consumer.take()) |slot| {
             const fr = frame.parse(slot);
             click_ctx.frame_seq = fr.header.seq;
-            held = null;
+            rect_count = 0;
             gi_count = 0;
 
             // Drain the atlas stream to head (atlas_head_required is the floor)
@@ -307,7 +309,11 @@ pub fn main(init: std.process.Init) !void {
                     .rect => {
                         if (cmd.payload.len == @sizeOf(draw.DrawRect)) {
                             const r: *const draw.DrawRect = @ptrCast(@alignCast(cmd.payload.ptr));
-                            held = r.*;
+
+                            if (rect_count < rect_instances.len) {
+                                rect_instances[rect_count] = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h, .rgba = r.rgba };
+                                rect_count += 1;
+                            }
                         } else std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{cmd.payload.len});
                     },
                     .text_run => {
@@ -342,7 +348,7 @@ pub fn main(init: std.process.Init) !void {
         // keep the flag set and wake ourselves so we retry on the next pump,
         // until it is on screen
         if (click_ctx.needs_repaint) {
-            if (gpu.paint(held, glyph_instances[0..gi_count])) {
+            if (gpu.paint(rect_instances[0..rect_count], glyph_instances[0..gi_count])) {
                 click_ctx.needs_repaint = false;
             } else {
                 glfw.glfwPostEmptyEvent();

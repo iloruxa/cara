@@ -135,8 +135,9 @@ pub fn main(init: std.process.Init) !void {
 
     // --- Build the page: parse Glyph -> scene, then style (in parse), layout ---
     const page_src =
-        \\box .bg-blue-500 .p-4 {
-        \\    text .text-2xl .text-white "Hello Cara"
+        \\box .bg-gray-900 .flow-col .p-4 .gap-2 {
+        \\    box .bg-blue-500 .p-4 { text .text-2xl .text-white "Hello Cara" }
+        \\    box .bg-red-500 .p-4 { text .text-white "Welcome to Glyph." }
         \\}
     ;
 

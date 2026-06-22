@@ -61,21 +61,39 @@ fn onMap(status: wgpu.WGPUMapAsyncStatus, message: wgpu.WGPUStringView, ud1: ?*a
 }
 
 // --- GPU: rectangle pipeline ---
-// Multi-line string
 const rect_wgsl =
-    \\@group(0) @binding(0) var<uniform> u_color: vec4<f32>;
-    \\@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-    \\    var p = array<vec2<f32>, 3>(
-    \\        vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0)
-    \\    );
-    \\    return vec4<f32>(p[i], 0.0, 1.0);
-    \\}
-    \\struct FsOut {
+    \\struct Uniforms { viewport: vec2<f32>, }
+    \\@group(0) @binding(0) var<uniform> u: Uniforms;
+    \\struct VsOut {
+    \\    @builtin(position) pos: vec4<f32>,
     \\    @location(0) color: vec4<f32>,
-    \\    @location(1) id: u32,
     \\}
-    \\@fragment fn fs() -> FsOut {
-    \\    return FsOut(u_color, 1u); // entity id 1 (the single rect); background = 0
+    \\@vertex fn vs(
+    \\    @builtin(vertex_index) vi: u32,
+    \\    @location(0) rect_pos: vec2<f32>,
+    \\    @location(1) rect_size: vec2<f32>,
+    \\    @location(2) rgba: u32,
+    \\) -> VsOut {
+    \\    var corner = array<vec2<f32>, 6>(
+    \\        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+    \\        vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    \\    );
+    \\    let c = corner[vi];
+    \\    let pixel = rect_pos + c * rect_size;
+    \\    let clip = vec2<f32>(pixel.x / u.viewport.x * 2.0 - 1.0, 1.0 - pixel.y / u.viewport.y * 2.0);
+    \\    var out: VsOut;
+    \\    out.pos = vec4<f32>(clip, 0.0, 1.0);
+    \\    out.color = vec4<f32>(
+    \\        f32((rgba >> 24u) & 255u) / 255.0,
+    \\        f32((rgba >> 16u) & 255u) / 255.0,
+    \\        f32((rgba >> 8u) & 255u) / 255.0,
+    \\        f32(rgba & 255u) / 255.0,
+    \\    );
+    \\    return out;
+    \\}
+    \\struct FsOut { @location(0) color: vec4<f32>, @location(1) id: u32, }
+    \\@fragment fn fs(in: VsOut) -> FsOut {
+    \\    return FsOut(in.color, 0u);
     \\}
 ;
 
@@ -127,9 +145,22 @@ fn sv(s: []const u8) wgpu.WGPUStringView {
     };
 }
 
+pub const RectInstance = extern struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rgba: u32,
+};
+
+// = 20
+const rect_instance_size = @sizeOf(RectInstance);
+const max_rects = 1024;
+
 const RectPainter = struct {
     pipeline: wgpu.WGPURenderPipeline,
-    buffer: wgpu.WGPUBuffer,
+    uniforms: wgpu.WGPUBuffer,
+    instances: wgpu.WGPUBuffer,
     bind_group: wgpu.WGPUBindGroup,
 };
 
@@ -242,6 +273,21 @@ fn createRectPainter(device: wgpu.WGPUDevice) ?RectPainter {
     const module = wgpu.wgpuDeviceCreateShaderModule(device, &sm_desc) orelse return null;
     defer wgpu.wgpuShaderModuleRelease(module);
 
+    const attrs = [_]wgpu.WGPUVertexAttribute{
+        .{ .format = @intCast(wgpu.WGPUVertexFormat_Float32x2), .offset = 0, .shaderLocation = 0 },
+        .{ .format = @intCast(wgpu.WGPUVertexFormat_Float32x2), .offset = 8, .shaderLocation = 1 },
+        .{ .format = @intCast(wgpu.WGPUVertexFormat_Uint32), .offset = 16, .shaderLocation = 2 },
+    };
+
+    const vbufs = [_]wgpu.WGPUVertexBufferLayout{
+        .{
+            .stepMode = @intCast(wgpu.WGPUVertexStepMode_Instance),
+            .arrayStride = rect_instance_size,
+            .attributeCount = attrs.len,
+            .attributes = &attrs,
+        },
+    };
+
     const targets = [_]wgpu.WGPUColorTargetState{
         .{ .format = @intCast(wgpu.WGPUTextureFormat_BGRA8Unorm), .writeMask = wgpu.WGPUColorWriteMask_All },
         .{ .format = @intCast(wgpu.WGPUTextureFormat_R32Uint), .writeMask = wgpu.WGPUColorWriteMask_All },
@@ -255,7 +301,7 @@ fn createRectPainter(device: wgpu.WGPUDevice) ?RectPainter {
     };
 
     const desc = wgpu.WGPURenderPipelineDescriptor{
-        .vertex = .{ .module = module, .entryPoint = sv("vs") },
+        .vertex = .{ .module = module, .entryPoint = sv("vs"), .bufferCount = 1, .buffers = &vbufs },
         .primitive = .{
             .topology = @intCast(wgpu.WGPUPrimitiveTopology_TriangleList),
             .frontFace = @intCast(wgpu.WGPUFrontFace_CCW),
@@ -267,19 +313,17 @@ fn createRectPainter(device: wgpu.WGPUDevice) ?RectPainter {
 
     const pipeline = wgpu.wgpuDeviceCreateRenderPipeline(device, &desc) orelse return null;
 
-    // 16-byte uniform buffer for the color (vec4<f32>)
-    const buf_desc = wgpu.WGPUBufferDescriptor{
-        .usage = wgpu.WGPUBufferUsage_Uniform | wgpu.WGPUBufferUsage_CopyDst,
-        .size = 16,
-    };
+    const ub_desc = wgpu.WGPUBufferDescriptor{ .usage = wgpu.WGPUBufferUsage_Uniform | wgpu.WGPUBufferUsage_CopyDst, .size = 16 };
+    const uniforms = wgpu.wgpuDeviceCreateBuffer(device, &ub_desc) orelse return null;
 
-    const buffer = wgpu.wgpuDeviceCreateBuffer(device, &buf_desc) orelse return null;
+    const ib_desc = wgpu.WGPUBufferDescriptor{ .usage = wgpu.WGPUBufferUsage_Vertex | wgpu.WGPUBufferUsage_CopyDst, .size = max_rects * rect_instance_size };
+    const instances = wgpu.wgpuDeviceCreateBuffer(device, &ib_desc) orelse return null;
 
     // Bind the buffer against the pipline's auto-generated group(0) layout
     const bgl = wgpu.wgpuRenderPipelineGetBindGroupLayout(pipeline, 0) orelse return null;
     defer wgpu.wgpuBindGroupLayoutRelease(bgl);
 
-    const entry = wgpu.WGPUBindGroupEntry{ .binding = 0, .buffer = buffer, .size = 16 };
+    const entry = wgpu.WGPUBindGroupEntry{ .binding = 0, .buffer = uniforms, .size = 16 };
 
     const bg_desc = wgpu.WGPUBindGroupDescriptor{
         .layout = bgl,
@@ -289,7 +333,7 @@ fn createRectPainter(device: wgpu.WGPUDevice) ?RectPainter {
 
     const bind_group = wgpu.wgpuDeviceCreateBindGroup(device, &bg_desc) orelse return null;
 
-    return .{ .pipeline = pipeline, .buffer = buffer, .bind_group = bind_group };
+    return .{ .pipeline = pipeline, .uniforms = uniforms, .instances = instances, .bind_group = bind_group };
 }
 
 // --- The Public GPU Context ---
@@ -362,7 +406,8 @@ pub const Gpu = struct {
         const painter = createRectPainter(device) orelse return error.Pipeline;
         errdefer {
             wgpu.wgpuBindGroupRelease(painter.bind_group);
-            wgpu.wgpuBufferRelease(painter.buffer);
+            wgpu.wgpuBufferRelease(painter.instances);
+            wgpu.wgpuBufferRelease(painter.uniforms);
             wgpu.wgpuRenderPipelineRelease(painter.pipeline);
         }
 
@@ -452,7 +497,8 @@ pub const Gpu = struct {
         wgpu.wgpuTextureViewRelease(self.id_view);
         wgpu.wgpuTextureRelease(self.id_texture);
         wgpu.wgpuBindGroupRelease(self.painter.bind_group);
-        wgpu.wgpuBufferRelease(self.painter.buffer);
+        wgpu.wgpuBufferRelease(self.painter.instances);
+        wgpu.wgpuBufferRelease(self.painter.uniforms);
         wgpu.wgpuRenderPipelineRelease(self.painter.pipeline);
         wgpu.wgpuQueueRelease(self.queue);
         wgpu.wgpuDeviceRelease(self.device);
@@ -471,7 +517,7 @@ pub const Gpu = struct {
     // --- per-frame paint: clear, then the rect (scissor-clipped) ---
     // * Returns true if it presented; false if the surface had no drawable yet
     // helps the caller to retry
-    pub fn paint(self: *Gpu, rect: ?draw.DrawRect, glyphs: []const GlyphInstance) bool {
+    pub fn paint(self: *Gpu, rects: []const RectInstance, glyphs: []const GlyphInstance) bool {
         var st: wgpu.WGPUSurfaceTexture = undefined;
         wgpu.wgpuSurfaceGetCurrentTexture(self.surface, &st);
 
@@ -506,21 +552,18 @@ pub const Gpu = struct {
         const pass_desc = wgpu.WGPURenderPassDescriptor{ .colorAttachmentCount = 2, .colorAttachments = &attachments };
         const pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc) orelse return false;
 
-        if (rect) |rr| {
-            const rgba = rr.rgba;
-            const rgba_f = [4]f32{
-                @as(f32, @floatFromInt((rgba >> 24) & 0xFF)) / 255.0,
-                @as(f32, @floatFromInt((rgba >> 16) & 0xFF)) / 255.0,
-                @as(f32, @floatFromInt((rgba >> 8) & 0xFF)) / 255.0,
-                @as(f32, @floatFromInt(rgba & 0xFF)) / 255.0,
-            };
+        if (rects.len > 0) {
+            const vp = [2]f32{ @floatFromInt(self.fb_w), @floatFromInt(self.fb_h) };
+            wgpu.wgpuQueueWriteBuffer(self.queue, self.painter.uniforms, 0, &vp, @sizeOf(@TypeOf(vp)));
 
-            wgpu.wgpuQueueWriteBuffer(self.queue, self.painter.buffer, 0, &rgba_f, @sizeOf(@TypeOf(rgba_f)));
+            const n = @min(rects.len, max_rects);
+            wgpu.wgpuQueueWriteBuffer(self.queue, self.painter.instances, 0, @ptrCast(rects.ptr), n * rect_instance_size);
 
+            wgpu.wgpuRenderPassEncoderSetScissorRect(pass, 0, 0, self.fb_w, self.fb_h);
             wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.painter.pipeline);
             wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.painter.bind_group, 0, null);
-            wgpu.wgpuRenderPassEncoderSetScissorRect(pass, @intFromFloat(rr.x), @intFromFloat(rr.y), @intFromFloat(rr.w), @intFromFloat(rr.h));
-            wgpu.wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+            wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.painter.instances, 0, n * rect_instance_size);
+            wgpu.wgpuRenderPassEncoderDraw(pass, 6, @intCast(n), 0, 0);
         }
 
         if (glyphs.len > 0) {
