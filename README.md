@@ -2,48 +2,55 @@
 
 A calmer, kinder web for the **people** who read and write it.
 
-Cara is a small, from-scratch browser. It does not render the existing web, and it never will. It renders Glyph, its own document format, and so carries none of the thirty years of compatibility complexity in HTML, CSS, and JavaScript.
+Cara is a small web browser built from scratch. It does not open normal websites, and it never will. Instead it shows its own kind of page, written in a simple format called **Glyph**. By skipping the thirty years of complexity behind today's web (HTML, CSS, JavaScript), Cara stays small enough for one person to understand completely.
 
-**Glyph** is a tiny four-rule markup language with no quirks mode and none of the accumulated compatibility tax. Behavior is scripted in **Luau**, interpreter-only, with no executable memory in the renderer's sandbox. Layout is a single pass of constraint propagation, and the engine is **Zig**, end to end. There is no DOM, no JavaScript runtime, no telemetry, no marketplace, and no opinion about what your homepage should be.
+Three small pieces, each doing one job:
 
-This is **a** browser, not *the* browser. The whole engine is meant to fit in one person's head, and you can read all of it in a weekend.
+- **Glyph** is how you write a page. Four simple rules, no legacy quirks: you say what is on the page and how it should look.
+- **Luau** is a small, safe scripting language that makes pages interactive, like responding to a click.
+- **Zig** is the language Cara itself is written in, top to bottom.
 
-## How it's built
+There is no sprawling document model, no JavaScript engine, no tracking, and no app store. This is **a** browser, not *the* browser, and you could read the whole codebase in a weekend.
 
-Two processes, two channels, and only two:
+## How it works
 
-- A privileged **host** owns the OS: the window, GPU, network, storage, clipboard, accessibility, hit-testing, and the process spawner.
-- A **renderer** (one per origin) owns the page: parsing, scene graph, style, layout, paint, text shaping and rasterization, image decode, and the Luau VM.
-- **Shared memory** carries bulk per-frame data (latest-wins frame slots plus an image/atlas staging region); a **Unix socket** carries 13 typed control messages and does the signaling. No pointer ever crosses either boundary.
+Cara runs as two separate programs that talk to each other:
 
-The renderer produces display-list frames; the host paints the newest and skips the stale. One language for the engine (Zig), one for behavior (Luau), one for documents (Glyph), small enough that one person can read all of it.
+- The **host** handles everything that touches your computer: the window, the screen, the mouse and keyboard, the network, and saved files.
+- The **renderer** handles the page itself: it reads the Glyph file, works out where everything goes, and decides what to draw. Each site gets its own renderer, sealed off from the rest of your machine.
 
-- **[`docs/HLD.md`](./docs/HLD.md)**: the five-minute orientation.
-- **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)**: the full specification, which governs wherever the two disagree.
+The renderer never draws to the screen directly. It writes down what each frame should look like (a plain list: a box here, some text there), and the host draws it. They share that list through a piece of memory both can read, and send short messages over a private channel. Splitting them apart and sealing the renderer in is the whole point: if a page goes wrong, or turns hostile, it cannot reach the rest of your computer.
 
-## Status
+- **[`docs/HLD.md`](./docs/HLD.md)**: a five-minute tour.
+- **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)**: the full design, which wins wherever the two disagree.
 
-Early, and honest about it. What runs on macOS today is an end-to-end **vertical slice**:
+## What works today
 
-- the host opens a window, creates the shared-memory region, and spawns the renderer, which maps and validates it across the process boundary;
-- a Unix-socket control channel, where the renderer's `FrameReady` wakes the host's event loop (no busy-wait);
-- a GPU path (wgpu-native, Metal-backed) that clears, presents, draws a rectangle, renders a parallel integer **ID buffer**, and hit-tests in O(1) by reading a single pixel;
-- a click resolved in the host and handed to the renderer as a pre-resolved `InputEvent`.
+On macOS, Cara already turns a Glyph page into a real, clickable window:
 
-The cross-process transport is still the bring-up ring; the latest-wins frame-slot reshape is the next step. Not yet built: the Glyph parser, scene graph, layout, the text pipeline, images, and Luau; the painted frame is a single hardcoded rectangle, and the renderer sandbox is designed but not yet enforced. The architecture spec's §12 has the full as-built picture.
+- It reads a page you write (boxes, colors, text), lays it out, and draws it. None of it is hardcoded.
+- Text is drawn with a real font, properly sized and placed.
+- Boxes can be nested and stacked in different colors.
+- Clicks work. Cara figures out exactly which element you clicked, and finds the code meant to handle it (so clicking the text on a button counts as clicking the button).
 
-## Build & run
+## What is not done yet
 
-Cara tracks **Zig master**; the exact version is pinned by `minimum_zig_version` in `build.zig.zon`, and [anyzig](https://github.com/marler8997/anyzig) reads that field to run the matching Zig per project. The targets are **macOS (Cocoa)** and **Linux (Wayland)**, no Windows; the running slice today is macOS.
+- **Pages cannot run scripts yet.** A click finds the code that should handle it, but the Luau engine that would actually run that code is not connected. That is the next step.
+- No images, no network, no saved data.
+- The safety sandbox is designed but not switched on.
+
+## Build and run
+
+Cara uses **Zig** (a specific recent version, pinned in `build.zig.zon`). [anyzig](https://github.com/marler8997/anyzig) reads that file and runs the matching Zig for you. It runs on **macOS** today; **Linux** is planned. No Windows.
 
 ```sh
 git clone --recurse-submodules <repo-url>
 cd cara
-zig build run     # build host + renderer, then run the host (it spawns the renderer)
+zig build run     # build everything and open the window
 zig build         # build only
-zig build test    # run the IPC unit tests
+zig build test    # run the tests
 ```
 
-# 
+---
 
 <img alt="Zig Mark" src="./assets/zig-mark.svg" width="400">
