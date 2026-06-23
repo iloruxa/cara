@@ -37,6 +37,15 @@ pub fn build(b: *std.Build) !void {
     const freetype_dep = b.dependency("freetype", .{ .target = target, .optimize = optimize });
     renderer.root_module.linkLibrary(freetype_dep.artifact("freetype"));
 
+    // --- Luau (vendored, interpreter-only)
+    // VM + Compiler + Ast built with zig c++
+    // CodeGen never compiled in
+    // Reached only through the C shim
+    const luau = buildLuau(b, target, optimize);
+    renderer.root_module.linkLibrary(luau);
+    // resolve the shim's C++ symbols at final link
+    renderer.root_module.link_libcpp = true;
+
     // Bindings: translate-c Freetype's public header at build time against the
     // package's include dir, exposed to the renderer as `freetype`
     const ft_c = b.addTranslateC(.{ .root_source_file = b.path("vendor/freetype_c.h"), .target = target, .optimize = optimize });
@@ -195,6 +204,97 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             return error.UnsupportedPlatform;
         },
     }
+
+    return lib;
+}
+
+const luau_src = [_][]const u8{
+    "vendor/luau_shim.cpp",
+    // Common (support code everything links: asserts, string utils, timing)
+    "vendor/luau/Common/src/BytecodeWire.cpp",
+    "vendor/luau/Common/src/StringUtils.cpp",
+    "vendor/luau/Common/src/TimeTrace.cpp",
+    // Bytecode (the Compiler emits through this)
+    "vendor/luau/Bytecode/src/BytecodeBuilder.cpp",
+    "vendor/luau/Bytecode/src/BytecodeGraph.cpp",
+    // VM
+    "vendor/luau/VM/src/lapi.cpp",
+    "vendor/luau/VM/src/laux.cpp",
+    "vendor/luau/VM/src/lbaselib.cpp",
+    "vendor/luau/VM/src/lbitlib.cpp",
+    "vendor/luau/VM/src/lbuffer.cpp",
+    "vendor/luau/VM/src/lbuflib.cpp",
+    "vendor/luau/VM/src/lbuiltins.cpp",
+    "vendor/luau/VM/src/lclass.cpp",
+    "vendor/luau/VM/src/lclasslib.cpp",
+    "vendor/luau/VM/src/lcorolib.cpp",
+    "vendor/luau/VM/src/ldblib.cpp",
+    "vendor/luau/VM/src/ldebug.cpp",
+    "vendor/luau/VM/src/ldo.cpp",
+    "vendor/luau/VM/src/lfunc.cpp",
+    "vendor/luau/VM/src/lgc.cpp",
+    "vendor/luau/VM/src/lgcdebug.cpp",
+    "vendor/luau/VM/src/linit.cpp",
+    "vendor/luau/VM/src/lintlib.cpp",
+    "vendor/luau/VM/src/lmathlib.cpp",
+    "vendor/luau/VM/src/lmem.cpp",
+    "vendor/luau/VM/src/lnumprint.cpp",
+    "vendor/luau/VM/src/lobject.cpp",
+    "vendor/luau/VM/src/loslib.cpp",
+    "vendor/luau/VM/src/lperf.cpp",
+    "vendor/luau/VM/src/lstate.cpp",
+    "vendor/luau/VM/src/lstring.cpp",
+    "vendor/luau/VM/src/lstrlib.cpp",
+    "vendor/luau/VM/src/ltable.cpp",
+    "vendor/luau/VM/src/ltablib.cpp",
+    "vendor/luau/VM/src/ltm.cpp",
+    "vendor/luau/VM/src/ludata.cpp",
+    "vendor/luau/VM/src/lutf8lib.cpp",
+    "vendor/luau/VM/src/lveclib.cpp",
+    "vendor/luau/VM/src/lvmexecute.cpp",
+    "vendor/luau/VM/src/lvmload.cpp",
+    "vendor/luau/VM/src/lvmutils.cpp",
+    // Compiler
+    "vendor/luau/Compiler/src/BuiltinFolding.cpp",
+    "vendor/luau/Compiler/src/Builtins.cpp",
+    "vendor/luau/Compiler/src/Compiler.cpp",
+    "vendor/luau/Compiler/src/ConstantFolding.cpp",
+    "vendor/luau/Compiler/src/CostModel.cpp",
+    "vendor/luau/Compiler/src/lcode.cpp",
+    "vendor/luau/Compiler/src/TableShape.cpp",
+    "vendor/luau/Compiler/src/Types.cpp",
+    "vendor/luau/Compiler/src/ValueTracking.cpp",
+    // Ast
+    "vendor/luau/Ast/src/Allocator.cpp",
+    "vendor/luau/Ast/src/Ast.cpp",
+    "vendor/luau/Ast/src/Confusables.cpp",
+    "vendor/luau/Ast/src/Cst.cpp",
+    "vendor/luau/Ast/src/Lexer.cpp",
+    "vendor/luau/Ast/src/Location.cpp",
+    "vendor/luau/Ast/src/Parser.cpp",
+    "vendor/luau/Ast/src/PrettyPrinter.cpp",
+};
+
+fn buildLuau(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const lib = b.addLibrary(.{
+        .name = "luau",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+    });
+    lib.root_module.link_libc = true;
+    lib.root_module.link_libcpp = true;
+
+    const includes = [_][]const u8{
+        "vendor/luau/Common/include",
+        "vendor/luau/Ast/include",
+        "vendor/luau/Bytecode/include",
+        "vendor/luau/Compiler/include",
+        "vendor/luau/VM/include",
+    };
+
+    for (includes) |p| lib.root_module.addIncludePath(b.path(p));
+
+    lib.root_module.addCSourceFiles(.{ .files = &luau_src, .flags = &.{"-std=c++17"} });
 
     return lib;
 }

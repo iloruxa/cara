@@ -8,6 +8,7 @@ const shaper = @import("shaper.zig");
 const staging = @import("staging");
 const scene_mod = @import("scene.zig");
 const glyph = @import("glyph.zig");
+const luau = @import("luau.zig");
 const layout = @import("layout.zig");
 const paint = @import("paint.zig");
 
@@ -42,6 +43,30 @@ fn drain(stream: net.Stream, io: std.Io, length: u32) !void {
 
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Cara renderer started\n", .{});
+
+    // TODO: REMOVE THIS
+    // --- Luau smoke test (temporary) ---\
+    // compile + run a trivial script print result
+    {
+        const L = luau.cara_luau_open() orelse {
+            std.debug.print("RENDERER: luau open failed\n", .{});
+            return error.LuauOpen;
+        };
+        defer luau.cara_luau_close(L);
+
+        const src = "return 1 + 2";
+
+        if (luau.cara_luau_loadstring(L, "smoke", src, src.len) != 0) {
+            std.debug.print("RENDERER: luau load erro: {s}\n", .{luau.cara_luau_tostring(L, -1) orelse "?"});
+            return error.LuauLoad;
+        }
+
+        if (luau.cara_luau_pcall(L, 0, 1) != 0) {
+            std.debug.print("RENDERER: luau run error: {s}\n", .{luau.cara_luau_tostring(L, -1) orelse "?"});
+        }
+
+        std.debug.print("RENDERER: luau says 1 + 2 = {d}\n", .{luau.cara_luau_tonumber(L, -1)});
+    }
 
     // argv:
     // - [0] -> self
