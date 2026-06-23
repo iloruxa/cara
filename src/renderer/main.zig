@@ -235,9 +235,15 @@ pub fn main(init: std.process.Init) !void {
 
                 readExact(control, init.io, std.mem.asBytes(&ev)) catch break;
 
-                std.debug.print("RENDERER InputEvent kind={d} at ({d},{d}) entity={d} frame_seq={d}\n", .{ ev.kind, ev.x, ev.y, ev.hit_entity, ev.frame_seq });
+                const hit: scene_mod.Entity = @bitCast(ev.hit_entity);
 
-                // Dispatch into the scene graph lands with the renderer brain
+                if (ev.hit_entity == 0) {
+                    std.debug.print("RENDERER: click ({d},{d}) hit background\n", .{ ev.x, ev.y });
+                } else if (scene_ptr.isValid(hit)) {
+                    std.debug.print("RENDERER: click ({d},{d}) hit entity index={d} gen={d} kind={s}\n", .{ ev.x, ev.y, hit.index, hit.generation, @tagName(scene_ptr.kind[hit.index]) });
+                } else {
+                    std.debug.print("RENDERER: click ({d},{d}) hit stale entity 0x{X}\n", .{ ev.x, ev.y, ev.hit_entity });
+                }
             },
             else => {
                 std.debug.print("RENDERER: unexpected tag={d} length={d}\n", .{ env.tag, env.length });

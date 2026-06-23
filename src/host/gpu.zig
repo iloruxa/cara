@@ -67,12 +67,14 @@ const rect_wgsl =
     \\struct VsOut {
     \\    @builtin(position) pos: vec4<f32>,
     \\    @location(0) color: vec4<f32>,
+    \\    @location(1) @interpolate(flat) entity: u32,
     \\}
     \\@vertex fn vs(
     \\    @builtin(vertex_index) vi: u32,
     \\    @location(0) rect_pos: vec2<f32>,
     \\    @location(1) rect_size: vec2<f32>,
     \\    @location(2) rgba: u32,
+    \\    @location(3) entity: u32,
     \\) -> VsOut {
     \\    var corner = array<vec2<f32>, 6>(
     \\        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
@@ -89,11 +91,12 @@ const rect_wgsl =
     \\        f32((rgba >> 8u) & 255u) / 255.0,
     \\        f32(rgba & 255u) / 255.0,
     \\    );
+    \\    out.entity = entity;
     \\    return out;
     \\}
     \\struct FsOut { @location(0) color: vec4<f32>, @location(1) id: u32, }
     \\@fragment fn fs(in: VsOut) -> FsOut {
-    \\    return FsOut(in.color, 0u);
+    \\    return FsOut(in.color, in.entity);
     \\}
 ;
 
@@ -105,6 +108,7 @@ const glyph_wgsl =
     \\    @builtin(position) pos: vec4<f32>,
     \\    @location(0) texel: vec2<f32>,
     \\    @location(1) color: vec4<f32>,
+    \\    @location(2) @interpolate(flat) entity: u32,
     \\}
     \\@vertex fn vs(
     \\    @builtin(vertex_index) vi: u32,
@@ -112,6 +116,7 @@ const glyph_wgsl =
     \\    @location(1) atlas_xy: vec2<f32>,
     \\    @location(2) atlas_wh: vec2<f32>,
     \\    @location(3) rgba: u32,
+    \\    @location(4) entity: u32,
     \\) -> VsOut {
     \\    var corner = array<vec2<f32>, 6>(
     \\        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
@@ -129,12 +134,13 @@ const glyph_wgsl =
     \\        f32((rgba >> 8u) & 255u) / 255.0,
     \\        f32(rgba & 255u) / 255.0,
     \\    );
+    \\    out.entity = entity;
     \\    return out;
     \\}
     \\struct FsOut { @location(0) color: vec4<f32>, @location(1) id: u32, }
     \\@fragment fn fs(in: VsOut) -> FsOut {
     \\    let cov = textureLoad(atlas_tex, vec2<i32>(in.texel), 0).r;
-    \\    return FsOut(vec4<f32>(in.color.rgb, in.color.a * cov), 0u);
+    \\    return FsOut(vec4<f32>(in.color.rgb, in.color.a * cov), in.entity);
     \\}
 ;
 
@@ -151,9 +157,10 @@ pub const RectInstance = extern struct {
     w: f32,
     h: f32,
     rgba: u32,
+    entity: u32,
 };
 
-// = 20
+// = 24
 const rect_instance_size = @sizeOf(RectInstance);
 const max_rects = 1024;
 
@@ -172,9 +179,10 @@ pub const GlyphInstance = extern struct {
     atlas_w: f32,
     atlas_h: f32,
     rgba: u32,
+    entity: u32,
 };
 
-// = 28
+// = 32
 const glyph_instance_size = @sizeOf(GlyphInstance);
 const max_glyphs = 4096;
 
@@ -197,6 +205,7 @@ fn createGlyphPainter(device: wgpu.WGPUDevice, atlas_view: wgpu.WGPUTextureView)
         .{ .format = @intCast(wgpu.WGPUVertexFormat_Float32x2), .offset = 8, .shaderLocation = 1 },
         .{ .format = @intCast(wgpu.WGPUVertexFormat_Float32x2), .offset = 16, .shaderLocation = 2 },
         .{ .format = @intCast(wgpu.WGPUVertexFormat_Uint32), .offset = 24, .shaderLocation = 3 },
+        .{ .format = @intCast(wgpu.WGPUVertexFormat_Uint32), .offset = 28, .shaderLocation = 4 },
     };
 
     const vbufs = [_]wgpu.WGPUVertexBufferLayout{
@@ -277,6 +286,7 @@ fn createRectPainter(device: wgpu.WGPUDevice) ?RectPainter {
         .{ .format = @intCast(wgpu.WGPUVertexFormat_Float32x2), .offset = 0, .shaderLocation = 0 },
         .{ .format = @intCast(wgpu.WGPUVertexFormat_Float32x2), .offset = 8, .shaderLocation = 1 },
         .{ .format = @intCast(wgpu.WGPUVertexFormat_Uint32), .offset = 16, .shaderLocation = 2 },
+        .{ .format = @intCast(wgpu.WGPUVertexFormat_Uint32), .offset = 20, .shaderLocation = 3 },
     };
 
     const vbufs = [_]wgpu.WGPUVertexBufferLayout{

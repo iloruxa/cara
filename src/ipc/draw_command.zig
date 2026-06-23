@@ -24,7 +24,14 @@ pub const DrawTag = enum(u32) {
 /// Fill an axis-aligned rectangle.
 /// Coordinates are f32 framebuffer pixels;
 /// `rgba` packs the colour as 0xRRGGBBAA.
-pub const DrawRect = extern struct { x: f32, y: f32, w: f32, h: f32, rgba: u32 };
+pub const DrawRect = extern struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rgba: u32,
+    entity: u32 = 0,
+};
 
 /// Fixed 8-byte prefix on every command. `size` is the payload byte count (it excludes this header)
 /// The whole record is `8 + padTo8(size)` bytes
@@ -53,6 +60,8 @@ pub const TextRunHeader = extern struct {
     rgba: u32,
 
     glyph_count: u32,
+
+    entity: u32,
 };
 
 /// One positioned glyph. The host draws an atlas_w x atlas_h quad
@@ -71,7 +80,7 @@ pub const PackedGlyph = extern struct {
 };
 
 comptime {
-    std.debug.assert(@sizeOf(TextRunHeader) == 8);
+    std.debug.assert(@sizeOf(TextRunHeader) == 12);
     std.debug.assert(@sizeOf(PackedGlyph) == 16);
     std.debug.assert(@alignOf(TextRunHeader) <= 8 and @alignOf(PackedGlyph) <= 8);
 }
@@ -123,7 +132,7 @@ pub const Encoder = struct {
 
     /// Append a packed text run: a TextRunHeader then the glyphs, as one command
     /// The whole run is a single DrawTextRun, never one command per glyph
-    pub fn textRun(self: *Encoder, rgba: u32, glyphs: []const PackedGlyph) Overflow!void {
+    pub fn textRun(self: *Encoder, rgba: u32, entity: u32, glyphs: []const PackedGlyph) Overflow!void {
         const glyph_bytes = std.mem.sliceAsBytes(glyphs);
         const payload_len = @sizeOf(TextRunHeader) + glyph_bytes.len;
         const record = command_header_size + padTo8(payload_len);
@@ -136,7 +145,7 @@ pub const Encoder = struct {
 
         var off = self.len + command_header_size;
 
-        const trh = TextRunHeader{ .rgba = rgba, .glyph_count = @intCast(glyphs.len) };
+        const trh = TextRunHeader{ .rgba = rgba, .glyph_count = @intCast(glyphs.len), .entity = entity };
 
         @memcpy(self.buf[off..][0..@sizeOf(TextRunHeader)], std.mem.asBytes(&trh));
 
@@ -185,6 +194,7 @@ pub const Iterator = struct {
 
 pub const TextRun = struct {
     rgba: u32,
+    entity: u32,
     glyphs: []const PackedGlyph,
 };
 
@@ -202,7 +212,7 @@ pub fn parseTextRun(payload: []const u8) ?TextRun {
 
     const glyphs: []const PackedGlyph = @as([*]const PackedGlyph, @ptrCast(@alignCast(rest.ptr)))[0..trh.glyph_count];
 
-    return .{ .rgba = trh.rgba, .glyphs = glyphs };
+    return .{ .rgba = trh.rgba, .entity = trh.entity, .glyphs = glyphs };
 }
 
 // --- Tests ---
@@ -275,7 +285,7 @@ test "encode a text run, iterate and parse it back" {
         .{ .screen_x = 10, .screen_y = 20, .atlas_x = 1, .atlas_y = 2, .atlas_w = 8, .atlas_h = 12 },
         .{ .screen_x = 18, .screen_y = 20, .atlas_x = 9, .atlas_y = 2, .atlas_w = 7, .atlas_h = 12 },
     };
-    try enc.textRun(0x3B82F6FF, &glyphs);
+    try enc.textRun(0x3B82F6FF, 7, &glyphs);
 
     var it = Iterator{ .buf = enc.bytes() };
     const cmd = it.next() orelse return error.NoCommand;
@@ -283,6 +293,7 @@ test "encode a text run, iterate and parse it back" {
 
     const run = parseTextRun(cmd.payload) orelse return error.BadRun;
     try testing.expectEqual(@as(u32, 0x3B82F6FF), run.rgba);
+    try testing.expectEqual(@as(u32, 7), run.entity);
     try testing.expectEqual(@as(usize, 2), run.glyphs.len);
     try testing.expectEqual(glyphs[1].atlas_x, run.glyphs[1].atlas_x);
     try testing.expectEqual(glyphs[0].screen_x, run.glyphs[0].screen_x);
@@ -294,7 +305,7 @@ test "a rect and a text run coexist in one command stream" {
     var enc = Encoder{ .buf = &buf };
     try enc.command(.rect, DrawRect{ .x = 0, .y = 0, .w = 4, .h = 4, .rgba = 0xFF0000FF });
     const glyphs = [_]PackedGlyph{.{ .screen_x = 1, .screen_y = 1, .atlas_x = 0, .atlas_y = 0, .atlas_w = 5, .atlas_h = 9 }};
-    try enc.textRun(0x00FF00FF, &glyphs);
+    try enc.textRun(0x00FF00FF, 0, &glyphs);
 
     var it = Iterator{ .buf = enc.bytes() };
     try testing.expectEqual(DrawTag.rect, (it.next() orelse return error.NoCommand).tag);
@@ -309,7 +320,7 @@ test "parseTextRun rejects a truncated payload" {
     var buf: [256]u8 align(8) = undefined;
     var enc = Encoder{ .buf = &buf };
     const glyphs = [_]PackedGlyph{.{ .screen_x = 0, .screen_y = 0, .atlas_x = 0, .atlas_y = 0, .atlas_w = 1, .atlas_h = 1 }};
-    try enc.textRun(0, &glyphs);
+    try enc.textRun(0, 0, &glyphs);
 
     var it = Iterator{ .buf = enc.bytes() };
     const cmd = it.next() orelse return error.NoCommand;

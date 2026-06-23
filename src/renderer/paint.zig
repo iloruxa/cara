@@ -55,7 +55,7 @@ pub const Painter = struct {
                     const sb = self.scene.box[sp.index];
                     const sd = self.scene.span[sp.index];
 
-                    try self.shaper.shapeInto(self.enc, sd.text, st.font_px, st.fg, sb.x, sb.y + ascent);
+                    try self.shaper.shapeInto(self.enc, sd.text, st.font_px, st.fg, @bitCast(e), sb.x, sb.y + ascent);
                 }
             },
             else => {
@@ -63,7 +63,7 @@ pub const Painter = struct {
 
                 // opaque alpha
                 if ((st.bg & 0xFF) != 0) {
-                    try self.enc.command(.rect, draw.DrawRect{ .x = box.x, .y = box.y, .w = box.w, .h = box.h, .rgba = st.bg });
+                    try self.enc.command(.rect, draw.DrawRect{ .x = box.x, .y = box.y, .w = box.w, .h = box.h, .rgba = st.bg, .entity = @bitCast(e) });
                 }
 
                 var it = self.scene.children(e);

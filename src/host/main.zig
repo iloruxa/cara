@@ -295,11 +295,8 @@ pub fn main(init: std.process.Init) !void {
             gi_count = 0;
 
             // Drain the atlas stream to head (atlas_head_required is the floor)
-            // GPU upload comes next
             while (atlas_consumer.pop(&glyph_cov) catch null) |drained| {
                 gpu.uploadGlyph(drained.entry.atlas_x, drained.entry.atlas_y, drained.entry.width, drained.entry.height, drained.coverage);
-                // held_glyphs[0] = .{ .screen_x = 500, .screen_y = 400, .atlas_x = @intCast(drained.entry.atlas_x), .atlas_y = @intCast(drained.entry.atlas_y), .atlas_w = @intCast(drained.entry.width), .atlas_h = @intCast(drained.entry.height) };
-                // held_count = 1;
             }
 
             var cmds = draw.Iterator{ .buf = fr.commands };
@@ -311,7 +308,7 @@ pub fn main(init: std.process.Init) !void {
                             const r: *const draw.DrawRect = @ptrCast(@alignCast(cmd.payload.ptr));
 
                             if (rect_count < rect_instances.len) {
-                                rect_instances[rect_count] = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h, .rgba = r.rgba };
+                                rect_instances[rect_count] = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h, .rgba = r.rgba, .entity = r.entity };
                                 rect_count += 1;
                             }
                         } else std.debug.print("HOST: malformed DrawRect ({d} bytes)\n", .{cmd.payload.len});
@@ -329,6 +326,7 @@ pub fn main(init: std.process.Init) !void {
                                     .atlas_w = @floatFromInt(gl.atlas_w),
                                     .atlas_h = @floatFromInt(gl.atlas_h),
                                     .rgba = run.rgba,
+                                    .entity = run.entity,
                                 };
 
                                 gi_count += 1;

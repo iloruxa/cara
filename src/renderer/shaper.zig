@@ -133,7 +133,7 @@ pub const Shaper = struct {
     }
 
     /// Append one DrawTextRun for `run`, pen starting at (pen_x, baseline_y)
-    pub fn shapeInto(self: *Shaper, enc: *draw.Encoder, run: []const u8, font_px: u32, rgba: u32, pen_x: f32, baseline_y: f32) !void {
+    pub fn shapeInto(self: *Shaper, enc: *draw.Encoder, run: []const u8, font_px: u32, rgba: u32, entity: u32, pen_x: f32, baseline_y: f32) !void {
         try self.rast.setPixelSize(font_px);
 
         var glyphs: [max_run_glyphs]draw.PackedGlyph = undefined;
@@ -161,6 +161,6 @@ pub const Shaper = struct {
             x += @as(f32, @floatFromInt(cg.advance));
         }
 
-        if (n > 0) try enc.textRun(rgba, glyphs[0..n]);
+        if (n > 0) try enc.textRun(rgba, entity, glyphs[0..n]);
     }
 };
