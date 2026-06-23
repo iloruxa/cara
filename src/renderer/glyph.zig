@@ -232,8 +232,10 @@ pub const Parser = struct {
                 .hash_id => self.advance(),
 
                 .identifier => {
-                    // its the next sibling node
+                    // Not an attribute; its the next sibling node
                     if (self.ahead.tag != .equals) break;
+
+                    const key = self.cur.text;
 
                     // key
                     self.advance();
@@ -242,7 +244,16 @@ pub const Parser = struct {
                     self.advance();
 
                     switch (self.cur.tag) {
-                        .string, .number, .signal => self.advance(),
+                        // Value (other attrs unused for now)
+                        .string, .number => self.advance(),
+                        .signal => {
+                            if (std.mem.eql(u8, key, "onClick")) {
+                                // Handler name (slice into source)
+                                self.scene.on_click[entity.index] = self.cur.text;
+                            }
+
+                            self.advance();
+                        },
                         else => return error.UnexpectedToken,
                     }
                 },

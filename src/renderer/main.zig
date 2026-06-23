@@ -136,8 +136,12 @@ pub fn main(init: std.process.Init) !void {
     // --- Build the page: parse Glyph -> scene, then style (in parse), layout ---
     const page_src =
         \\box .bg-gray-900 .flow-col .p-4 .gap-2 {
-        \\    box .bg-blue-500 .p-4 { text .text-2xl .text-white "Hello Cara" }
-        \\    box .bg-red-500 .p-4 { text .text-white "Welcome to Glyph." }
+        \\    box .bg-blue-500 .p-4 onClick=$greet {
+        \\        text .text-2xl .text-white "Hello Cara"
+        \\    }
+        \\    box .bg-red-500 .p-4 {
+        \\        text .text-white "Welcome to Glyph."
+        \\    }
         \\}
     ;
 
@@ -240,7 +244,28 @@ pub fn main(init: std.process.Init) !void {
                 if (ev.hit_entity == 0) {
                     std.debug.print("RENDERER: click ({d},{d}) hit background\n", .{ ev.x, ev.y });
                 } else if (scene_ptr.isValid(hit)) {
-                    std.debug.print("RENDERER: click ({d},{d}) hit entity index={d} gen={d} kind={s}\n", .{ ev.x, ev.y, hit.index, hit.generation, @tagName(scene_ptr.kind[hit.index]) });
+                    // Bubble: walk parent links from the hit entity to the nearest onClick handler
+                    var e = hit;
+                    var target = scene_mod.Entity.none;
+
+                    while (true) {
+                        if (scene_ptr.on_click[e.index].len > 0) {
+                            target = e;
+                            break;
+                        }
+
+                        const p = scene_ptr.parent[e.index];
+
+                        if (p.isNone()) break;
+
+                        e = p;
+                    }
+
+                    if (!target.isNone()) {
+                        std.debug.print("RENDERER: click on {s} #{d} -> would call onClick handler '{s}' (entity {d})\n", .{ @tagName(scene_ptr.kind[hit.index]), hit.index, scene_ptr.on_click[target.index], target.index });
+                    } else {
+                        std.debug.print("RENDERER: click on {s} #{d}, no onClick handler in ancestry\n", .{ @tagName(scene_ptr.kind[hit.index]), hit.index });
+                    }
                 } else {
                     std.debug.print("RENDERER: click ({d},{d}) hit stale entity 0x{X}\n", .{ ev.x, ev.y, ev.hit_entity });
                 }

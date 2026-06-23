@@ -96,6 +96,9 @@ pub const Scene = struct {
     span: [max_entities]SpanData,
     box: [max_entities]Box,
 
+    // Luau handler name from onClick=$name. "" = none
+    on_click: [max_entities][]const u8,
+
     // slots ever handed out
     high_water: u24,
 
@@ -133,6 +136,7 @@ pub const Scene = struct {
         self.style[idx] = .{};
         self.span[idx] = .{};
         self.box[idx] = .{};
+        self.on_click[idx] = "";
 
         return .{ .index = idx, .generation = self.generation[idx] };
     }
