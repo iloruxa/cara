@@ -180,13 +180,38 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
+    // --- Page Behavior: One Luau VM runs the page script ---
+    const page_script =
+        \\function greet()
+        \\    print("Clicked Cara!")
+        \\end
+    ;
+
+    const vm = luau.cara_luau_open() orelse {
+        std.debug.print("RENDERER: luau open failed\n", .{});
+        return error.LuauOpen;
+    };
+    defer luau.cara_luau_close(vm);
+
+    if (luau.cara_luau_loadstring(vm, "page", page_script, page_script.len) != 0) {
+        std.debug.print("RENDERER: page script load error: {s}\n", .{luau.cara_luau_tostring(vm, -1) orelse "?"});
+        return error.LuauLoad;
+    }
+
+    if (luau.cara_luau_pcall(vm, 0, 0) != 0) {
+        std.debug.print("RENDERER: page script run error: {s}\n", .{luau.cara_luau_tostring(vm, -1) orelse "?"});
+        return error.LuauRun;
+    }
+
+    std.debug.print("RENDERER: page script loaded\n", .{});
+
     var lay = layout.Layout{
         .scene = scene_ptr,
         .measurer = paint.measurer(&sh),
     };
 
     // framebuffer-pixel viewport
-    // TODO: Host to supply thi via Resize later
+    // TODO: Host to supply this via Resize later
     lay.run(root, 2048, 1536);
 
     const uaddr = try net.UnixAddress.init(sock_path);
@@ -287,7 +312,38 @@ pub fn main(init: std.process.Init) !void {
                     }
 
                     if (!target.isNone()) {
-                        std.debug.print("RENDERER: click on {s} #{d} -> would call onClick handler '{s}' (entity {d})\n", .{ @tagName(scene_ptr.kind[hit.index]), hit.index, scene_ptr.on_click[target.index], target.index });
+                        const handler = scene_ptr.on_click[target.index];
+
+                        if (handler.len < 128) {
+                            var name_buf: [128]u8 = undefined;
+
+                            @memcpy(name_buf[0..handler.len], handler);
+
+                            // on_click is a source slice, not null-terminated
+                            name_buf[handler.len] = 0;
+
+                            const name_z: [*:0]const u8 = @ptrCast(&name_buf);
+
+                            _ = luau.cara_luau_getglobal(vm, name_z);
+
+                            if (luau.cara_luau_isfunction(vm, -1) != 0) {
+                                std.debug.print("RENDERER: calling onClick '{s}'\n", .{handler});
+
+                                if (luau.cara_luau_pcall(vm, 0, 0) != 0) {
+                                    std.debug.print("RENDERER: handler '{s}' error: {s}\n", .{ handler, luau.cara_luau_tostring(vm, -1) orelse "?" });
+
+                                    // pop the error message
+                                    luau.cara_luau_pop(vm, 1);
+                                }
+                            } else {
+                                std.debug.print("RENDERER: onClick '{s}' is not a function\n", .{handler});
+
+                                // pop the non-function value
+                                luau.cara_luau_pop(vm, 1);
+                            }
+                        } else {
+                            std.debug.print("RENDERER: click on {s} #{d}, no onClick handler in ancestry\n", .{ @tagName(scene_ptr.kind[hit.index]), hit.index });
+                        }
                     } else {
                         std.debug.print("RENDERER: click on {s} #{d}, no onClick handler in ancestry\n", .{ @tagName(scene_ptr.kind[hit.index]), hit.index });
                     }
