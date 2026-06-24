@@ -41,6 +41,57 @@ fn drain(stream: net.Stream, io: std.Io, length: u32) !void {
     }
 }
 
+const SignalStore = struct {
+    const max = 64;
+    const name_max = 32;
+
+    names: [max][name_max]u8 = undefined,
+    name_lens: [max]usize = undefined,
+    vals: [max]i64 = undefined,
+    n: usize = 0,
+
+    fn slot(self: *SignalStore, name: []const u8) *i64 {
+        var i: usize = 0;
+
+        while (i < self.n) : (i += 1) {
+            if (std.mem.eql(u8, self.names[i][0..self.name_lens[i]], name)) return &self.vals[i];
+        }
+
+        // overflow fallback
+        if (self.n >= max) return &self.vals[0];
+
+        const len = @min(name.len, name_max);
+
+        @memcpy(self.names[self.n][0..len], name[0..len]);
+
+        self.name_lens[self.n] = len;
+        self.vals[self.n] = 0;
+        self.n += 1;
+
+        return &self.vals[self.n - 1];
+    }
+
+    fn get(self: *SignalStore, name: []const u8) i64 {
+        return self.slot(name).*;
+    }
+
+    fn set(self: *SignalStore, name: []const u8, v: i64) void {
+        self.slot(name).* = v;
+    }
+};
+
+var g_signals: SignalStore = .{};
+
+// Called from the Luau shim for get()/set()
+export fn cara_host_signal_get(name_ptr: [*]const u8, len: usize) i64 {
+    return g_signals.get(name_ptr[0..len]);
+}
+
+export fn cara_host_signal_set(name_ptr: [*]const u8, len: usize, value: i64) void {
+    std.debug.print("RENDERER: set '{s}' = {d}\n", .{ name_ptr[0..len], value });
+    g_signals.set(name_ptr[0..len], value);
+}
+
 fn produceFrame(
     seq: u32,
     root: scene_mod.Entity,
@@ -84,13 +135,15 @@ fn produceFrame(
     std.debug.print("RENDERER: published frame seq={d} ({d} cmd bytes)\n", .{ seq, painter.enc.bytes().len });
 }
 
-fn resolveBindings(scene: *scene_mod.Scene, count: i64) void {
+fn resolveBindings(scene: *scene_mod.Scene) void {
     var i: u24 = 0;
 
     while (i < scene.high_water) : (i += 1) {
         if (scene.bind[i].len == 0) continue;
 
-        const s = std.fmt.bufPrint(&scene.num_buf[i], "{d}", .{count}) catch continue;
+        const val = g_signals.get(scene.bind[i]);
+        std.debug.print("RENDERER: resolve '{s}' = {d}\n", .{ scene.bind[i], val });
+        const s = std.fmt.bufPrint(&scene.num_buf[i], "{d}", .{val}) catch continue;
         const span = scene.first_child[i];
 
         if (!span.isNone()) scene.span[span.index].text = s;
@@ -237,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
     // --- Page Behavior: One Luau VM runs the page script ---
     const page_script =
         \\function greet()
-        \\    print("Clicked Cara!")
+        \\    set("count", get("count") + 1)
         \\end
     ;
 
@@ -246,6 +299,9 @@ pub fn main(init: std.process.Init) !void {
         return error.LuauOpen;
     };
     defer luau.cara_luau_close(vm);
+
+    // exposes get()/set() to the page script
+    luau.cara_luau_register_signals(vm);
 
     if (luau.cara_luau_loadstring(vm, "page", page_script, page_script.len) != 0) {
         std.debug.print("RENDERER: page script load error: {s}\n", .{luau.cara_luau_tostring(vm, -1) orelse "?"});
@@ -285,9 +341,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // First frame. produceFrame does layout + paint + publish + FrameReady
-    var click_count: i64 = 0;
-
-    resolveBindings(scene_ptr, click_count);
+    resolveBindings(scene_ptr);
 
     produceFrame(1, root, &lay, &painter, &producer, &atlas_stream, control, init.io) catch |err| {
         std.debug.print("RENDERER: produceFrame(1) failed: {s}\n", .{@errorName(err)});
@@ -366,9 +420,6 @@ pub fn main(init: std.process.Init) !void {
 
                                 // a handler ran, re-render
                                 dirty = true;
-
-                                // TODO: move this into luau handler
-                                click_count += 1;
                             } else {
                                 std.debug.print("RENDERER: onClick '{s}' is not a function\n", .{handler});
 
@@ -388,7 +439,7 @@ pub fn main(init: std.process.Init) !void {
                 if (dirty) {
                     frame_seq += 1;
 
-                    resolveBindings(scene_ptr, click_count);
+                    resolveBindings(scene_ptr);
 
                     produceFrame(frame_seq, root, &lay, &painter, &producer, &atlas_stream, control, init.io) catch |err| {
                         std.debug.print("RENDERER: re-render failed: {s}\n", .{@errorName(err)});

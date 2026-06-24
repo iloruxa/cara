@@ -20,3 +20,4 @@ pub extern fn cara_luau_tonumber(L: *State, idx: c_int) f64;
 pub extern fn cara_luau_tostring(L: *State, idx: c_int) ?[*:0]const u8;
 pub extern fn cara_luau_pop(L: *State, n: c_int) void;
 pub extern fn cara_luau_isfunction(L: *State, idx: c_int) c_int;
+pub extern fn cara_luau_register_signals(L: *State) void;

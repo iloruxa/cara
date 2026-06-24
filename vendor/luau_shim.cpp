@@ -61,3 +61,31 @@ int cara_luau_isfunction(lua_State *L, int idx) {
   return lua_isfunction(L, idx);
 }
 }
+
+// --- Signal bridge: get/set globals backed by the renderer's signal store ---
+// The store lives in the renderer (Zig); these are implemented there
+extern "C" long long cara_host_signal_get(const char *name, size_t len);
+extern "C" void cara_host_signal_set(const char *name, size_t len,
+                                     long long value);
+
+static int l_signal_get(lua_State *L) {
+  size_t len = 0;
+  const char *name = luaL_checklstring(L, 1, &len);
+  lua_pushnumber(L, (double)cara_host_signal_get(name, len));
+  return 1;
+}
+
+static int l_signal_set(lua_State *L) {
+  size_t len = 0;
+  const char *name = luaL_checklstring(L, 1, &len);
+  long long value = (long long)luaL_checknumber(L, 2);
+  cara_host_signal_set(name, len, value);
+  return 0;
+}
+
+extern "C" void cara_luau_register_signals(lua_State *L) {
+  lua_pushcfunction(L, l_signal_get, "get");
+  lua_setglobal(L, "get");
+  lua_pushcfunction(L, l_signal_set, "set");
+  lua_setglobal(L, "set");
+}
