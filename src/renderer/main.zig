@@ -41,6 +41,62 @@ fn drain(stream: net.Stream, io: std.Io, length: u32) !void {
     }
 }
 
+fn produceFrame(
+    seq: u32,
+    root: scene_mod.Entity,
+    lay: *layout.Layout,
+    painter: *paint.Painter,
+    producer: *frame.Producer,
+    atlas_stream: *staging.Producer,
+    control: net.Stream,
+    io: std.Io,
+) !void {
+    // TODO: host supplies the viewport via Resize later
+    lay.run(root, 2048, 1536);
+
+    // reset the encoder, re-encode the full display list
+    painter.enc.len = 0;
+
+    try painter.paint(root);
+
+    try producer.writeFrame(.{
+        .seq = seq,
+        .viewport_w = 0,
+        .viewport_h = 0,
+        .atlas_head_required = atlas_stream.headCursor(),
+    }, &.{}, painter.enc.bytes());
+
+    producer.publish();
+
+    // Publish strictly before signal: FrameReady goes out only after publish
+    var ctl_buf: [64]u8 = undefined;
+    var cw = control.writer(io, &ctl_buf);
+    const env = protocol.Envelope{
+        .tag = @intFromEnum(protocol.Tag.frame_ready),
+        .flags = 0,
+        .length = 0,
+        .seq = seq,
+    };
+
+    try cw.interface.writeAll(std.mem.asBytes(&env));
+    try cw.interface.flush();
+
+    std.debug.print("RENDERER: published frame seq={d} ({d} cmd bytes)\n", .{ seq, painter.enc.bytes().len });
+}
+
+fn resolveBindings(scene: *scene_mod.Scene, count: i64) void {
+    var i: u24 = 0;
+
+    while (i < scene.high_water) : (i += 1) {
+        if (scene.bind[i].len == 0) continue;
+
+        const s = std.fmt.bufPrint(&scene.num_buf[i], "{d}", .{count}) catch continue;
+        const span = scene.first_child[i];
+
+        if (!span.isNone()) scene.span[span.index].text = s;
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     std.debug.print("Cara renderer started\n", .{});
 
@@ -162,11 +218,9 @@ pub fn main(init: std.process.Init) !void {
     const page_src =
         \\box .bg-gray-900 .flow-col .p-4 .gap-2 {
         \\    box .bg-blue-500 .p-4 onClick=$greet {
-        \\        text .text-2xl .text-white "Hello Cara"
+        \\        text .text-2xl .text-white "Click Me"
         \\    }
-        \\    box .bg-red-500 .p-4 {
-        \\        text .text-white "Welcome to Glyph."
-        \\    }
+        \\    text .text-2xl .text-white $count
         \\}
     ;
 
@@ -210,10 +264,6 @@ pub fn main(init: std.process.Init) !void {
         .measurer = paint.measurer(&sh),
     };
 
-    // framebuffer-pixel viewport
-    // TODO: Host to supply this via Resize later
-    lay.run(root, 2048, 1536);
-
     const uaddr = try net.UnixAddress.init(sock_path);
     const control = try uaddr.connect(init.io);
     defer control.close(init.io);
@@ -234,40 +284,17 @@ pub fn main(init: std.process.Init) !void {
         .enc = &enc,
     };
 
-    painter.paint(root) catch |err| {
-        std.debug.print("RENDERER: paint failed: {s}\n", .{@errorName(err)});
+    // First frame. produceFrame does layout + paint + publish + FrameReady
+    var click_count: i64 = 0;
+
+    resolveBindings(scene_ptr, click_count);
+
+    produceFrame(1, root, &lay, &painter, &producer, &atlas_stream, control, init.io) catch |err| {
+        std.debug.print("RENDERER: produceFrame(1) failed: {s}\n", .{@errorName(err)});
         return err;
     };
 
-    // viewport is 0 until the host supplies it via LoadPage/Resize
-    producer.writeFrame(.{ .seq = 1, .viewport_w = 0, .viewport_h = 0, .atlas_head_required = atlas_stream.headCursor() }, &.{}, enc.bytes()) catch |err| {
-        std.debug.print("RENDERER: writeFrame failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
-
-    producer.publish();
-
-    std.debug.print("RENDERER: published frame seq=1 ({d} command bytes)\n", .{enc.bytes().len});
-
-    // Publish strictly before signal: FrameReady goes out right after puhblish
-    // before we block on input. flags=0 means no wants_tick - this frame is static
-    {
-        var ctl_buf: [64]u8 = undefined;
-        var cw = control.writer(init.io, &ctl_buf);
-        const env = protocol.Envelope{ .tag = @intFromEnum(protocol.Tag.frame_ready), .flags = 0, .length = 0, .seq = 1 };
-
-        cw.interface.writeAll(std.mem.asBytes(&env)) catch |err| {
-            std.debug.print("RENDERER: FrameReady write failed: {s}\n", .{@errorName(err)});
-            return err;
-        };
-
-        cw.interface.flush() catch |err| {
-            std.debug.print("RENDERER: FrameReady flush failed: {s}\n", .{@errorName(err)});
-            return err;
-        };
-    }
-
-    std.debug.print("RENDERER: sent FrameReady (after publish)\n", .{});
+    var frame_seq: u32 = 1;
 
     // --- Receive control messages until the host closes the channel ---
     std.debug.print("RENDERER: listening for input\n", .{});
@@ -289,6 +316,7 @@ pub fn main(init: std.process.Init) !void {
 
                 readExact(control, init.io, std.mem.asBytes(&ev)) catch break;
 
+                var dirty = false;
                 const hit: scene_mod.Entity = @bitCast(ev.hit_entity);
 
                 if (ev.hit_entity == 0) {
@@ -335,6 +363,12 @@ pub fn main(init: std.process.Init) !void {
                                     // pop the error message
                                     luau.cara_luau_pop(vm, 1);
                                 }
+
+                                // a handler ran, re-render
+                                dirty = true;
+
+                                // TODO: move this into luau handler
+                                click_count += 1;
                             } else {
                                 std.debug.print("RENDERER: onClick '{s}' is not a function\n", .{handler});
 
@@ -349,6 +383,16 @@ pub fn main(init: std.process.Init) !void {
                     }
                 } else {
                     std.debug.print("RENDERER: click ({d},{d}) hit stale entity 0x{X}\n", .{ ev.x, ev.y, ev.hit_entity });
+                }
+
+                if (dirty) {
+                    frame_seq += 1;
+
+                    resolveBindings(scene_ptr, click_count);
+
+                    produceFrame(frame_seq, root, &lay, &painter, &producer, &atlas_stream, control, init.io) catch |err| {
+                        std.debug.print("RENDERER: re-render failed: {s}\n", .{@errorName(err)});
+                    };
                 }
             },
             else => {

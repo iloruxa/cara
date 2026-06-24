@@ -280,6 +280,14 @@ pub const Parser = struct {
             // content (markdown-desugaring)
             try desugar(self.scene, entity, self.cur.text, self.cur.triple_quoted);
             self.advance();
+        } else if (self.cur.tag == .signal) {
+            // $name content: bind this node to a signal
+            // one span holds the resolved value
+            self.scene.bind[entity.index] = self.cur.text;
+            const span = try self.scene.create(.span);
+            self.scene.span[span.index] = .{ .text = "" };
+            self.scene.appendChild(entity, span);
+            self.advance();
         }
 
         return entity;

@@ -105,6 +105,12 @@ pub const Scene = struct {
     // recycled slot indices
     free: [max_entities]u24,
 
+    // signal name a node's content binds to ($name); "" = none
+    bind: [max_entities][]const u8,
+
+    // scratch for a bound node's formatted value
+    num_buf: [max_entities][24]u8,
+
     free_len: u24,
 
     pub const Error = error{SceneFull};
@@ -137,6 +143,7 @@ pub const Scene = struct {
         self.span[idx] = .{};
         self.box[idx] = .{};
         self.on_click[idx] = "";
+        self.bind[idx] = "";
 
         return .{ .index = idx, .generation = self.generation[idx] };
     }
