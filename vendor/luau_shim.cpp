@@ -17,7 +17,9 @@ lua_State *cara_luau_open(void) {
   if (!L)
     return nullptr;
   luaL_openlibs(L);
-  luaL_sandbox(L);
+  // NOTE: luaL_sandbox is deferred for now
+  // Can be done when implementing per-page sanboxed threads
+  // luaL_sandbox(L);
   return L;
 }
 
@@ -54,4 +56,8 @@ const char *cara_luau_tostring(lua_State *L, int idx) {
 }
 
 void cara_luau_pop(lua_State *L, int n) { lua_settop(L, -(n)-1); }
+
+int cara_luau_isfunction(lua_State *L, int idx) {
+  return lua_isfunction(L, idx);
+}
 }
