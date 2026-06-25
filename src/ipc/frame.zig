@@ -140,7 +140,9 @@ pub const FrameTooLarge = error{FrameTooLarge};
 
 /// A parsed view of one slot: header plus in-place slices. No Copies.
 pub const Frame = struct {
-    header: *const FrameHeader,
+    // copied out of the slot
+    // never re-read renderer-writable memory
+    header: FrameHeader,
     damage: []const DamageRect,
     commands: []const u8,
 };
@@ -236,24 +238,49 @@ pub const Consumer = struct {
         const next = Latest{ .slot = self.front, .dirty = false, .generation = cur.generation };
         const got: Latest = @bitCast(@atomicRmw(u32, &self.frames.header.latest, .Xchg, @as(u32, @bitCast(next)), .acq_rel));
 
-        self.front = got.slot;
+        // `latest` is renderer-writable
+        // clamp the slot so a corrupt index can never index pas the slots
+        // NOTE: This is the one place renderer-controlled index enters
+        const slot: u2 = @min(got.slot, slot_count - 1);
 
-        return self.frames.slotBytes(got.slot);
+        self.front = slot;
+
+        return self.frames.slotBytes(slot);
     }
 };
 
 /// Parse a taken slot into header + in-place damage/command slices
+/// The slot is renderer-writable: the header is copied once (never re-read)
+/// and every renderer-supplied count is bounded to the slot, so a hostile or
+/// garbage header can never slice out of bounds.
+/// Worst case is garbage pixels, never an OOB read
 pub fn parse(slot_bytes: []const u8) Frame {
+    const header_size = @sizeOf(FrameHeader);
+
+    if (slot_bytes.len < header_size) {
+        return .{ .header = .{ .seq = 0, .viewport_w = 0, .viewport_h = 0 }, .damage = &.{}, .commands = &.{} };
+    }
+
     const hp: *const FrameHeader = @ptrCast(@alignCast(slot_bytes.ptr));
-    var off: usize = @sizeOf(FrameHeader);
+
+    // read once; do not re-dereference renderer-writable memory
+    const hdr = hp.*;
+
+    const after_header = slot_bytes.len - header_size;
+    const max_damage = after_header / @sizeOf(DamageRect);
+    const dmg_count = @min(@as(usize, hdr.damage_rect_count), max_damage);
+
+    var off: usize = header_size;
     const dptr: [*]const DamageRect = @ptrCast(@alignCast(slot_bytes[off..].ptr));
-    const damage = dptr[0..hp.damage_rect_count];
+    const damage = dptr[0..dmg_count];
 
-    off += @as(usize, hp.damage_rect_count) * @sizeOf(DamageRect);
+    off += dmg_count * @sizeOf(DamageRect);
 
-    const commands = slot_bytes[off..][0..hp.command_bytes];
+    const remaining = slot_bytes.len - off;
+    const cmd_len = @min(@as(usize, hdr.command_bytes), remaining);
+    const commands = slot_bytes[off..][0..cmd_len];
 
-    return .{ .header = hp, .damage = damage, .commands = commands };
+    return .{ .header = hdr, .damage = damage, .commands = commands };
 }
 
 // --- Tests ---
@@ -350,4 +377,25 @@ test "writeFrame rejects a frame larger than the slot" {
     var p = f.producer();
     const big = test_region_buf[0..slot_size]; // len == slot_size, so header + this overflows
     try testing.expectError(error.FrameTooLarge, p.writeFrame(.{ .seq = 0, .viewport_w = 0, .viewport_h = 0 }, &.{}, big));
+}
+
+test "a corrupt latest slot index never reads out of bounds" {
+    const f = freshFrames();
+    const bad = Latest{ .slot = 3, .dirty = true, .generation = 1 }; // slot 3: only 0..2 exist
+    @atomicStore(u32, &f.header.latest, @as(u32, @bitCast(bad)), .release);
+    var c = f.consumer();
+    const slot = c.take() orelse return error.NothingTaken;
+    try testing.expectEqual(@as(usize, slot_size), slot.len); // in-bounds, no OOB
+}
+
+test "oversized header counts are clamped to the slot" {
+    var buf: [1024]u8 align(8) = std.mem.zeroes([1024]u8);
+    const hp: *FrameHeader = @ptrCast(@alignCast(&buf));
+    hp.damage_rect_count = 0xFFFF_FFFF;
+    hp.command_bytes = 0xFFFF_FFFF;
+
+    const fr = parse(&buf);
+    try testing.expect(fr.commands.len <= buf.len);
+    try testing.expect(fr.damage.len * @sizeOf(DamageRect) <= buf.len);
+    for (fr.commands) |_| {} // touch every byte; must not run past the slot
 }
