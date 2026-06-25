@@ -46,17 +46,11 @@ Cara runs on **macOS (Apple Silicon)** today; Linux is planned, Windows is not. 
 - **Zig**, via [anyzig](https://github.com/marler8997/anyzig). It reads the exact version from `build.zig.zon` and runs the matching Zig for you, so there is no version to pick.
 - **Xcode Command Line Tools** (`xcode-select --install`), for the macOS frameworks Cara links (Metal, QuartzCore, Cocoa, IOKit).
 
-**1. Clone with submodules.** This also pulls the two vendored libraries, **glfw** (windowing) and **Luau** (scripting); their URLs are recorded in `.gitmodules`, so you do not supply them.
+Then clone and build. Every dependency is fetched automatically on the first build, pinned in `build.zig.zon`: **glfw** (windowing) and **Luau** (scripting), both built from source, the **wgpu-native** GPU library, and **FreeType**. The font is bundled in the repo. There are no submodules and nothing else to download.
 
 ```sh
-git clone --recurse-submodules https://codeberg.org/rootkill/cara.git
+git clone https://codeberg.org/rootkill/cara.git
 cd cara
-# already cloned without it? run: git submodule update --init --recursive
-```
-
-**2. Build and run.** The first build fetches the rest automatically: the **wgpu-native** GPU library and **FreeType**, both pinned in `build.zig.zon`. The bundled font is already in the repo. There is nothing else to download.
-
-```sh
 zig build run     # build host + renderer, then run (the host spawns the renderer)
 zig build         # build only
 zig build test    # run the unit tests
