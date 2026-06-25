@@ -2,6 +2,5 @@
   "$schema": "https://raw.githubusercontent.com/zigtools/zls/master/schema.json",
   "enable_build_on_save": true,
   "include_dirs": [
-    "vendor/glfw/include"
   ]
 }

@@ -40,6 +40,14 @@
             .url = "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.0.0/wgpu-macos-aarch64-release.zip",
             .hash = "N-V-__8AAP25fAK9uyvxPl28uoHYZhzGkEqs3Z34Dz4IN5Vk",
         },
+        .glfw = .{
+            .url = "git+https://github.com/glfw/glfw?ref=3.4#7b6aead9fb88b3623e3b3725ebb42670cbe4c579",
+            .hash = "N-V-__8AAKE_TAAJO1RHyQ6MPZFPLLCAyHNu7iYXh7n1KEfH",
+        },
+        .luau = .{
+            .url = "git+https://github.com/luau-lang/luau?ref=0.726#86d2a9dcd7cef396b73b1585371723e169e69a41",
+            .hash = "N-V-__8AAIIHywB985XuxojdtwpussGZFCEwRNOBvHN-SAuo",
+        },
     },
     .paths = .{
         "build.zig",

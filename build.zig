@@ -130,6 +130,7 @@ pub fn build(b: *std.Build) !void {
 }
 
 fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) !*std.Build.Step.Compile {
+    const glfw_dep = b.dependency("glfw", .{});
     const lib = b.addLibrary(.{
         .name = "glfw",
         .linkage = .static,
@@ -137,22 +138,22 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     });
 
     lib.root_module.link_libc = true;
-    lib.root_module.addIncludePath(b.path("vendor/glfw/include"));
+    lib.root_module.addIncludePath(glfw_dep.path("include"));
 
-    lib.root_module.addCSourceFiles(.{ .files = &.{
-        "vendor/glfw/src/context.c",
-        "vendor/glfw/src/init.c",
-        "vendor/glfw/src/input.c",
-        "vendor/glfw/src/monitor.c",
-        "vendor/glfw/src/platform.c",
-        "vendor/glfw/src/vulkan.c",
-        "vendor/glfw/src/window.c",
-        "vendor/glfw/src/egl_context.c",
-        "vendor/glfw/src/osmesa_context.c",
-        "vendor/glfw/src/null_init.c",
-        "vendor/glfw/src/null_monitor.c",
-        "vendor/glfw/src/null_window.c",
-        "vendor/glfw/src/null_joystick.c",
+    lib.root_module.addCSourceFiles(.{ .root = glfw_dep.path(""), .files = &.{
+        "src/context.c",
+        "src/init.c",
+        "src/input.c",
+        "src/monitor.c",
+        "src/platform.c",
+        "src/vulkan.c",
+        "src/window.c",
+        "src/egl_context.c",
+        "src/osmesa_context.c",
+        "src/null_init.c",
+        "src/null_monitor.c",
+        "src/null_window.c",
+        "src/null_joystick.c",
     }, .flags = &.{} });
 
     switch (target.result.os.tag) {
@@ -164,15 +165,15 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             const wayland_headers = generateWaylandProtocols(b);
             lib.root_module.addIncludePath(wayland_headers);
 
-            lib.root_module.addCSourceFiles(.{ .files = &.{
-                "vendor/glfw/src/wl_init.c",
-                "vendor/glfw/src/wl_monitor.c",
-                "vendor/glfw/src/wl_window.c",
-                "vendor/glfw/src/xkb_unicode.c",
-                "vendor/glfw/src/posix_module.c",
-                "vendor/glfw/src/posix_time.c",
-                "vendor/glfw/src/posix_thread.c",
-                "vendor/glfw/src/posix_poll.c",
+            lib.root_module.addCSourceFiles(.{ .root = glfw_dep.path(""), .files = &.{
+                "src/wl_init.c",
+                "src/wl_monitor.c",
+                "src/wl_window.c",
+                "src/xkb_unicode.c",
+                "src/posix_module.c",
+                "src/posix_time.c",
+                "src/posix_thread.c",
+                "src/posix_poll.c",
             }, .flags = &.{} });
 
             lib.root_module.linkSystemLibrary("wayland-client", .{});
@@ -181,15 +182,15 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
         .macos => {
             lib.root_module.addCMacro("_GLFW_COCOA", "");
-            lib.root_module.addCSourceFiles(.{ .files = &.{
-                "vendor/glfw/src/cocoa_init.m",
-                "vendor/glfw/src/cocoa_monitor.m",
-                "vendor/glfw/src/cocoa_window.m",
-                "vendor/glfw/src/cocoa_joystick.m",
-                "vendor/glfw/src/cocoa_time.c",
-                "vendor/glfw/src/nsgl_context.m",
-                "vendor/glfw/src/posix_module.c",
-                "vendor/glfw/src/posix_thread.c",
+            lib.root_module.addCSourceFiles(.{ .root = glfw_dep.path(""), .files = &.{
+                "src/cocoa_init.m",
+                "src/cocoa_monitor.m",
+                "src/cocoa_window.m",
+                "src/cocoa_joystick.m",
+                "src/cocoa_time.c",
+                "src/nsgl_context.m",
+                "src/posix_module.c",
+                "src/posix_thread.c",
             }, .flags = &.{} });
             lib.root_module.linkFramework("Cocoa", .{});
             lib.root_module.linkFramework("IOKit", .{});
@@ -210,73 +211,73 @@ fn buildGlfw(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 }
 
 const luau_src = [_][]const u8{
-    "vendor/luau_shim.cpp",
     // Common (support code everything links: asserts, string utils, timing)
-    "vendor/luau/Common/src/BytecodeWire.cpp",
-    "vendor/luau/Common/src/StringUtils.cpp",
-    "vendor/luau/Common/src/TimeTrace.cpp",
+    "Common/src/BytecodeWire.cpp",
+    "Common/src/StringUtils.cpp",
+    "Common/src/TimeTrace.cpp",
     // Bytecode (the Compiler emits through this)
-    "vendor/luau/Bytecode/src/BytecodeBuilder.cpp",
-    "vendor/luau/Bytecode/src/BytecodeGraph.cpp",
+    "Bytecode/src/BytecodeBuilder.cpp",
+    "Bytecode/src/BytecodeGraph.cpp",
     // VM
-    "vendor/luau/VM/src/lapi.cpp",
-    "vendor/luau/VM/src/laux.cpp",
-    "vendor/luau/VM/src/lbaselib.cpp",
-    "vendor/luau/VM/src/lbitlib.cpp",
-    "vendor/luau/VM/src/lbuffer.cpp",
-    "vendor/luau/VM/src/lbuflib.cpp",
-    "vendor/luau/VM/src/lbuiltins.cpp",
-    "vendor/luau/VM/src/lclass.cpp",
-    "vendor/luau/VM/src/lclasslib.cpp",
-    "vendor/luau/VM/src/lcorolib.cpp",
-    "vendor/luau/VM/src/ldblib.cpp",
-    "vendor/luau/VM/src/ldebug.cpp",
-    "vendor/luau/VM/src/ldo.cpp",
-    "vendor/luau/VM/src/lfunc.cpp",
-    "vendor/luau/VM/src/lgc.cpp",
-    "vendor/luau/VM/src/lgcdebug.cpp",
-    "vendor/luau/VM/src/linit.cpp",
-    "vendor/luau/VM/src/lintlib.cpp",
-    "vendor/luau/VM/src/lmathlib.cpp",
-    "vendor/luau/VM/src/lmem.cpp",
-    "vendor/luau/VM/src/lnumprint.cpp",
-    "vendor/luau/VM/src/lobject.cpp",
-    "vendor/luau/VM/src/loslib.cpp",
-    "vendor/luau/VM/src/lperf.cpp",
-    "vendor/luau/VM/src/lstate.cpp",
-    "vendor/luau/VM/src/lstring.cpp",
-    "vendor/luau/VM/src/lstrlib.cpp",
-    "vendor/luau/VM/src/ltable.cpp",
-    "vendor/luau/VM/src/ltablib.cpp",
-    "vendor/luau/VM/src/ltm.cpp",
-    "vendor/luau/VM/src/ludata.cpp",
-    "vendor/luau/VM/src/lutf8lib.cpp",
-    "vendor/luau/VM/src/lveclib.cpp",
-    "vendor/luau/VM/src/lvmexecute.cpp",
-    "vendor/luau/VM/src/lvmload.cpp",
-    "vendor/luau/VM/src/lvmutils.cpp",
+    "VM/src/lapi.cpp",
+    "VM/src/laux.cpp",
+    "VM/src/lbaselib.cpp",
+    "VM/src/lbitlib.cpp",
+    "VM/src/lbuffer.cpp",
+    "VM/src/lbuflib.cpp",
+    "VM/src/lbuiltins.cpp",
+    "VM/src/lclass.cpp",
+    "VM/src/lclasslib.cpp",
+    "VM/src/lcorolib.cpp",
+    "VM/src/ldblib.cpp",
+    "VM/src/ldebug.cpp",
+    "VM/src/ldo.cpp",
+    "VM/src/lfunc.cpp",
+    "VM/src/lgc.cpp",
+    "VM/src/lgcdebug.cpp",
+    "VM/src/linit.cpp",
+    "VM/src/lintlib.cpp",
+    "VM/src/lmathlib.cpp",
+    "VM/src/lmem.cpp",
+    "VM/src/lnumprint.cpp",
+    "VM/src/lobject.cpp",
+    "VM/src/loslib.cpp",
+    "VM/src/lperf.cpp",
+    "VM/src/lstate.cpp",
+    "VM/src/lstring.cpp",
+    "VM/src/lstrlib.cpp",
+    "VM/src/ltable.cpp",
+    "VM/src/ltablib.cpp",
+    "VM/src/ltm.cpp",
+    "VM/src/ludata.cpp",
+    "VM/src/lutf8lib.cpp",
+    "VM/src/lveclib.cpp",
+    "VM/src/lvmexecute.cpp",
+    "VM/src/lvmload.cpp",
+    "VM/src/lvmutils.cpp",
     // Compiler
-    "vendor/luau/Compiler/src/BuiltinFolding.cpp",
-    "vendor/luau/Compiler/src/Builtins.cpp",
-    "vendor/luau/Compiler/src/Compiler.cpp",
-    "vendor/luau/Compiler/src/ConstantFolding.cpp",
-    "vendor/luau/Compiler/src/CostModel.cpp",
-    "vendor/luau/Compiler/src/lcode.cpp",
-    "vendor/luau/Compiler/src/TableShape.cpp",
-    "vendor/luau/Compiler/src/Types.cpp",
-    "vendor/luau/Compiler/src/ValueTracking.cpp",
+    "Compiler/src/BuiltinFolding.cpp",
+    "Compiler/src/Builtins.cpp",
+    "Compiler/src/Compiler.cpp",
+    "Compiler/src/ConstantFolding.cpp",
+    "Compiler/src/CostModel.cpp",
+    "Compiler/src/lcode.cpp",
+    "Compiler/src/TableShape.cpp",
+    "Compiler/src/Types.cpp",
+    "Compiler/src/ValueTracking.cpp",
     // Ast
-    "vendor/luau/Ast/src/Allocator.cpp",
-    "vendor/luau/Ast/src/Ast.cpp",
-    "vendor/luau/Ast/src/Confusables.cpp",
-    "vendor/luau/Ast/src/Cst.cpp",
-    "vendor/luau/Ast/src/Lexer.cpp",
-    "vendor/luau/Ast/src/Location.cpp",
-    "vendor/luau/Ast/src/Parser.cpp",
-    "vendor/luau/Ast/src/PrettyPrinter.cpp",
+    "Ast/src/Allocator.cpp",
+    "Ast/src/Ast.cpp",
+    "Ast/src/Confusables.cpp",
+    "Ast/src/Cst.cpp",
+    "Ast/src/Lexer.cpp",
+    "Ast/src/Location.cpp",
+    "Ast/src/Parser.cpp",
+    "Ast/src/PrettyPrinter.cpp",
 };
 
 fn buildLuau(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const luau_dep = b.dependency("luau", .{});
     const lib = b.addLibrary(.{
         .name = "luau",
         .linkage = .static,
@@ -286,27 +287,32 @@ fn buildLuau(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     lib.root_module.link_libcpp = true;
 
     const includes = [_][]const u8{
-        "vendor/luau/Common/include",
-        "vendor/luau/Ast/include",
-        "vendor/luau/Bytecode/include",
-        "vendor/luau/Compiler/include",
-        "vendor/luau/VM/include",
+        "Common/include",
+        "Ast/include",
+        "Bytecode/include",
+        "Compiler/include",
+        "VM/include",
     };
 
-    for (includes) |p| lib.root_module.addIncludePath(b.path(p));
+    for (includes) |p| lib.root_module.addIncludePath(luau_dep.path(p));
 
-    lib.root_module.addCSourceFiles(.{ .files = &luau_src, .flags = &.{"-std=c++17"} });
+    // Luau's own sources
+    lib.root_module.addCSourceFiles(.{ .root = luau_dep.path(""), .files = &luau_src, .flags = &.{"-std=c++17"} });
+
+    // Our C shim over Luau's C++ API lives in-tree
+    lib.root_module.addCSourceFiles(.{ .files = &.{"vendor/luau_shim.cpp"}, .flags = &.{"-std=c++17"} });
 
     return lib;
 }
 
 fn generateWaylandProtocols(b: *std.Build) std.Build.LazyPath {
+    const glfw_dep = b.dependency("glfw", .{});
     const headers = b.addWriteFiles();
 
     const protocols = [_][]const u8{ "wayland", "xdg-shell", "xdg-decoration-unstable-v1", "xdg-activation-v1", "viewporter", "relative-pointer-unstable-v1", "pointer-constraints-unstable-v1", "fractional-scale-1" };
 
     for (protocols) |proto| {
-        const xml_path = b.path(b.fmt("vendor/glfw/deps/wayland/{s}.xml", .{proto}));
+        const xml_path = glfw_dep.path(b.fmt("deps/wayland/{s}.xml", .{proto}));
 
         const header_cmd = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
         header_cmd.addFileArg(xml_path);
