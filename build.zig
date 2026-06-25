@@ -104,6 +104,7 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&b.addRunArtifact(staging_tests).step);
 
     // --- GPU: wgpu-native (WebGPU), prebuilt static lib + translate-c bindings ---
+    const wgpu_dep = b.dependency("wgpu", .{});
     const wgpu_module = b.createModule(.{
         .root_source_file = b.path("vendor/wgpu.zig"),
         .target = target,
@@ -113,7 +114,7 @@ pub fn build(b: *std.Build) !void {
 
     // Link the prebuilt archive + the frameworks its Metal backed needs.
     // (IOKit + CoreFoundation already come in via glfw)
-    host.root_module.addObjectFile(b.path("vendor/wgpu/lib/libwgpu_native.a"));
+    host.root_module.addObjectFile(wgpu_dep.path("lib/libwgpu_native.a"));
     host.root_module.linkFramework("Metal", .{});
     host.root_module.linkFramework("QuartzCore", .{});
     host.root_module.linkFramework("Foundation", .{});

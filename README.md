@@ -54,16 +54,7 @@ cd cara
 # already cloned without it? run: git submodule update --init --recursive
 ```
 
-**2. Fetch the GPU library.** Cara draws through **wgpu-native**, a prebuilt static library too large to keep in git, so you fetch it once. From [gfx-rs/wgpu-native releases](https://github.com/gfx-rs/wgpu-native/releases), download the **macOS aarch64** build at version `<WGPU_VERSION>` (the one the vendored `vendor/wgpu.zig` bindings were generated against), then unzip it so the static lib lands at `vendor/wgpu/lib/libwgpu_native.a`:
-
-```sh
-mkdir -p vendor/wgpu
-unzip wgpu-macos-aarch64-release.zip -d vendor/wgpu
-```
-
-(FreeType is fetched automatically the first time you build, and the bundled font is already in the repo, so there is nothing else to download.)
-
-**3. Build and run.**
+**2. Build and run.** The first build fetches the rest automatically: the **wgpu-native** GPU library and **FreeType**, both pinned in `build.zig.zon`. The bundled font is already in the repo. There is nothing else to download.
 
 ```sh
 zig build run     # build host + renderer, then run (the host spawns the renderer)
