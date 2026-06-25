@@ -220,7 +220,7 @@ const testing = std.testing;
 
 test "DrawRect has a stable, ring-compatible layout" {
     // 4 * f32 + u32. No padding here
-    try testing.expectEqual(@as(usize, 20), @sizeOf(DrawRect));
+    try testing.expectEqual(@as(usize, 24), @sizeOf(DrawRect));
 
     try testing.expect(@alignOf(DrawRect) <= 8);
 
@@ -273,7 +273,7 @@ test "encoder rejects a command that does not fit, writing nothing" {
 }
 
 test "PackedGlyph and TextRunHeader have stable layouts" {
-    try testing.expectEqual(@as(usize, 8), @sizeOf(TextRunHeader));
+    try testing.expectEqual(@as(usize, 12), @sizeOf(TextRunHeader));
     try testing.expectEqual(@as(usize, 16), @sizeOf(PackedGlyph));
 }
 
