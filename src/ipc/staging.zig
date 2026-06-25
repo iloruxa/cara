@@ -195,28 +195,40 @@ pub const Consumer = struct {
     pub fn pop(self: *Consumer, coverage_out: []u8) PopError!?Drained {
         const head = @atomicLoad(u32, &self.staging.header.atlas_head, .acquire);
 
-        // nothing new
-        if (head -% self.tail == 0) return null;
+        // head is renderer-writable
+        // Clamp the published span to the buffer so a corrupt head can't
+        // claim more than physically exists
+        const avail = @min(head -% self.tail, self.staging.capacity);
+
+        // No complete entry header published
+        if (avail < @sizeOf(AtlasEntry)) return null;
 
         var entry: AtlasEntry = undefined;
         self.staging.readAt(self.tail, std.mem.asBytes(&entry));
         const len: usize = @as(usize, entry.width) * @as(usize, entry.height);
 
+        // A garbage width/height must not drive an OOB read
+        // The whole entry (header + coverage) must fit within what was actually published...
+        if (@sizeOf(AtlasEntry) + len > avail) return null;
+
+        // ... and within the caller's scratch buffer
         if (len > coverage_out.len) return error.CoverageBufferTooSmall;
 
         self.staging.readAt(self.tail +% @sizeOf(AtlasEntry), coverage_out[0..len]);
 
-        // Release: frees the consumed bytes for the producer
         self.tail +%= @sizeOf(AtlasEntry) + @as(u32, @intCast(len));
 
         @atomicStore(u32, &self.staging.header.atlas_tail, self.tail, .release);
 
-        return .{ .entry = entry, .coverage = coverage_out[0..len] };
+        return .{
+            .entry = entry,
+            .coverage = coverage_out[0..len],
+        };
     }
 
     // Bytes published but not yet drained (head -% tail)
     pub fn used(self: Consumer) u32 {
-        return @atomicLoad(u32, &self.staging.header.atlas_head, .acquire) -% self.tail;
+        return @min(@atomicLoad(u32, &self.staging.header.atlas_head, .acquire) -% self.tail, self.staging.capacity);
     }
 };
 
@@ -341,4 +353,23 @@ test "many push/pop cycles keep FIFO and used = head -% tail correct" {
         try testing.expectEqual(seq, g.entry.atlas_x);
         try testing.expectEqual(@as(u32, 0), c.used());
     }
+}
+
+test "A garbage entry claiming more than published is rejected, no OOB" {
+    const s = fresh();
+    const entry = AtlasEntry{ .atlas_x = 0, .atlas_y = 0, .width = 0xFFFF, .height = 0xFFFF }; // len ~4.3e9
+    s.writeAt(0, std.mem.asBytes(&entry));
+    @atomicStore(u32, &s.header.atlas_head, test_cap, .release); // claim the whole buffer is published
+
+    var c = s.consumer();
+    var out: [256]u8 = undefined;
+    const r = try c.pop(&out); // oversized entry rejected; the huge coverage is never read
+    try testing.expect(r == null);
+}
+
+test "A corrupt head is clamped to capacity" {
+    const s = fresh();
+    @atomicStore(u32, &s.header.atlas_head, test_cap *% 4, .release); // far past the buffer
+    var c = s.consumer();
+    try testing.expect(c.used() <= test_cap);
 }
