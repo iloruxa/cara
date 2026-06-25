@@ -2,6 +2,5 @@
 .zig-cache/
 zig-out/
 *.o
-vendor/wgpu
 **/.DS_STORE
 zig-pkg
