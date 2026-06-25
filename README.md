@@ -41,14 +41,34 @@ On macOS, Cara already turns a Glyph page into a real, clickable window:
 
 ## Build and run
 
-Cara uses **Zig** (a specific recent version, pinned in `build.zig.zon`). [anyzig](https://github.com/marler8997/anyzig) reads that file and runs the matching Zig for you. It runs on **macOS** today; **Linux** is planned. No Windows.
+Cara runs on **macOS (Apple Silicon)** today; Linux is planned, Windows is not. You need two things on your machine:
+
+- **Zig**, via [anyzig](https://github.com/marler8997/anyzig). It reads the exact version from `build.zig.zon` and runs the matching Zig for you, so there is no version to pick.
+- **Xcode Command Line Tools** (`xcode-select --install`), for the macOS frameworks Cara links (Metal, QuartzCore, Cocoa, IOKit).
+
+**1. Clone with submodules.** This also pulls the two vendored libraries, **glfw** (windowing) and **Luau** (scripting); their URLs are recorded in `.gitmodules`, so you do not supply them.
 
 ```sh
-git clone --recurse-submodules <repo-url>
+git clone --recurse-submodules https://codeberg.org/rootkill/cara.git
 cd cara
-zig build run     # build everything and open the window
+# already cloned without it? run: git submodule update --init --recursive
+```
+
+**2. Fetch the GPU library.** Cara draws through **wgpu-native**, a prebuilt static library too large to keep in git, so you fetch it once. From [gfx-rs/wgpu-native releases](https://github.com/gfx-rs/wgpu-native/releases), download the **macOS aarch64** build at version `<WGPU_VERSION>` (the one the vendored `vendor/wgpu.zig` bindings were generated against), then unzip it so the static lib lands at `vendor/wgpu/lib/libwgpu_native.a`:
+
+```sh
+mkdir -p vendor/wgpu
+unzip wgpu-macos-aarch64-release.zip -d vendor/wgpu
+```
+
+(FreeType is fetched automatically the first time you build, and the bundled font is already in the repo, so there is nothing else to download.)
+
+**3. Build and run.**
+
+```sh
+zig build run     # build host + renderer, then run (the host spawns the renderer)
 zig build         # build only
-zig build test    # run the tests
+zig build test    # run the unit tests
 ```
 
 ---
