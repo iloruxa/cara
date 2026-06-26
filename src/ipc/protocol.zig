@@ -33,6 +33,23 @@ pub const Tag = enum(u32) {
     _,
 };
 
+/// Tags a sandboxed renderer is allowed to send to the host
+/// The host rejects everything else: host->renderer-only tags
+/// and unknown or garbage values, which the Non-exhaustive enum maps to `_`
+pub fn rendererMaySend(tag: Tag) bool {
+    return switch (tag) {
+        .fetch, .storage_op, .frame_ready, .a11y_update, .process_healthcheck => true,
+        else => false,
+    };
+}
+
+/// Coarse upper bound on a control payload: a hostile renderer
+/// must not make the host drain a multi-gigabyte `length`
+/// This is the ceiling, each message validates its own payload
+/// tightly when it is wired
+// = 1 MiB
+pub const max_control_payload: u32 = 1 << 20;
+
 /// Bits in `Envelope.flags`. On `frame_ready`, `frame_wants_tick`
 /// asks the host to arm `FrameTick`; absent it, the host sends
 /// no ticks (idle stays zero)
@@ -108,4 +125,12 @@ test "InputEvent payload layout is stable" {
     try testing.expectEqual(@as(usize, 24), @sizeOf(InputEvent));
     try testing.expectEqual(@as(usize, 16), @offsetOf(InputEvent, "hit_entity"));
     try testing.expectEqual(@as(usize, 20), @offsetOf(InputEvent, "frame_seq"));
+}
+
+test "only renderer->host tags are accepted from the renderer" {
+    try testing.expect(rendererMaySend(.frame_ready));
+    try testing.expect(rendererMaySend(.fetch));
+    try testing.expect(!rendererMaySend(.input_event)); // host->renderer only
+    try testing.expect(!rendererMaySend(.frame_tick)); // host->renderer only
+    try testing.expect(!rendererMaySend(@enumFromInt(9999))); // garbage -> `_`
 }

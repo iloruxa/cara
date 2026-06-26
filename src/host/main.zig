@@ -126,6 +126,22 @@ fn controlLoop(control: net.Stream, io: std.Io) void {
             return;
         };
 
+        const tag: protocol.Tag = @enumFromInt(env.tag);
+
+        // The renderer is hostile, reject out-of-subset tags and
+        // absurd payload sizes before draining a byte
+        // A violation means lost framing on the stream
+        // so we cannot safely resync. Close the channel
+        if (!protocol.rendererMaySend(tag)) {
+            std.debug.print("IPC: closing an out-of-subset tag={d}\n", .{env.tag});
+            return;
+        }
+
+        if (env.length > protocol.max_control_payload) {
+            std.debug.print("IPC: closing on oversized payload len={d}\n", .{env.length});
+            return;
+        }
+
         // Drain any payload: this thread only reacts to the envelope tag
         var remaining: usize = env.length;
         var skip: [256]u8 = undefined;
@@ -138,9 +154,9 @@ fn controlLoop(control: net.Stream, io: std.Io) void {
             remaining -= want;
         }
 
-        switch (@as(protocol.Tag, @enumFromInt(env.tag))) {
+        switch (tag) {
             .frame_ready => glfw.glfwPostEmptyEvent(),
-            else => std.debug.print("IPC: unexpected tag={d}\n", .{env.tag}),
+            else => std.debug.print("IPC: tag={d} in subset but not yet handled\n", .{env.tag}),
         }
     }
 }
