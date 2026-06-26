@@ -3,6 +3,10 @@ const glfw = @import("glfw");
 const wgpu = @import("wgpu");
 const draw = @import("draw");
 
+// The glyph atlas is a fixed atlas_dim x atlas_dim R8 texture which matches the renderer's packer
+// The host's texture is authoritative, every atlas write is validated against it
+const atlas_dim: u32 = 1024;
+
 // --- Cocoa = Ojb-C glue : No zig-native path for creating CAMetalLayer ---
 extern fn glfwGetCocoaWindow(window: ?*anyopaque) ?*anyopaque;
 extern fn objc_getClass(name: [*:0]const u8) ?*anyopaque;
@@ -464,7 +468,7 @@ pub const Gpu = struct {
         const atlas_desc = wgpu.WGPUTextureDescriptor{
             .usage = wgpu.WGPUTextureUsage_TextureBinding | wgpu.WGPUTextureUsage_CopyDst,
             .dimension = @intCast(wgpu.WGPUTextureDimension_2D),
-            .size = .{ .width = 1024, .height = 1024, .depthOrArrayLayers = 1 },
+            .size = .{ .width = atlas_dim, .height = atlas_dim, .depthOrArrayLayers = 1 },
             .format = @intCast(wgpu.WGPUTextureFormat_R8Unorm),
             .mipLevelCount = 1,
             .sampleCount = 1,
@@ -651,6 +655,13 @@ pub const Gpu = struct {
     /// unlike a buffer copy, so width is fine as bytesPerRow
     pub fn uploadGlyph(self: *Gpu, x: u32, y: u32, w: u32, h: u32, coverage: []const u8) void {
         if (w == 0 or h == 0) return;
+
+        // x/y/w/h come from a renderer-controlled atlas entry
+        // A forged rect must not drive writeTexture past the atlas
+        // Require the rect fully inside the texture
+        // NOTE: Subtraction form: so the u32 arithmetic can't overflow
+        if (x >= atlas_dim or y >= atlas_dim) return;
+        if (w > atlas_dim - x or h > atlas_dim - y) return;
 
         const dst = wgpu.WGPUTexelCopyTextureInfo{
             .texture = self.atlas_texture,
