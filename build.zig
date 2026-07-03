@@ -103,6 +103,21 @@ pub fn build(b: *std.Build) !void {
     const staging_tests = b.addTest(.{ .root_module = staging_module });
     test_step.dependOn(&b.addRunArtifact(staging_tests).step);
 
+    // IPC: SCM_RIGHTS fd passing (host -> renderer), imported by both processes
+    const fdpass_module = b.createModule(.{
+        .root_source_file = b.path("src/ipc/fdpass.zig"),
+        .target = target,
+        .optimize = optimize,
+
+        // uses libc sendmsg/recvmsg/socketpair
+        .link_libc = true,
+    });
+    host.root_module.addImport("fdpass", fdpass_module);
+    renderer.root_module.addImport("fdpass", fdpass_module);
+
+    const fdpass_tests = b.addTest(.{ .root_module = fdpass_module });
+    test_step.dependOn(&b.addRunArtifact(fdpass_tests).step);
+
     // --- GPU: wgpu-native (WebGPU), prebuilt static lib + translate-c bindings ---
     const wgpu_dep = b.dependency("wgpu", .{});
     const wgpu_module = b.createModule(.{
