@@ -5,6 +5,7 @@ const fdpass = @import("fdpass");
 const frame = @import("frame");
 const raster = @import("raster.zig");
 const protocol = @import("protocol");
+const sandbox = @import("sandbox.zig");
 const shaper = @import("shaper.zig");
 const staging = @import("staging");
 const scene_mod = @import("scene.zig");
@@ -250,6 +251,15 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     defer rast.deinit();
+
+    // --- Lockdown: Everything is held, nothing can be acquired ---
+    // Security over functionality: if the sandbox cannot engage: DO NOT RUN
+    sandbox.lockdown() catch |err| {
+        std.debug.print("RENDERER: refusing to run unsandboxed\n", .{});
+        return err;
+    };
+
+    std.debug.print("RENDERER: seatbelt lockdown active\n", .{});
 
     var sh = shaper.Shaper.init(&rast, &packer, &atlas_stream);
 
