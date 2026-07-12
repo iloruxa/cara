@@ -1,6 +1,7 @@
 const std = @import("std");
 const atlas = @import("atlas.zig");
 const draw = @import("draw");
+const fdpass = @import("fdpass");
 const frame = @import("frame");
 const raster = @import("raster.zig");
 const protocol = @import("protocol");
@@ -179,24 +180,14 @@ pub fn main(init: std.process.Init) !void {
 
     // argv:
     // - [0] -> self
-    // - [1] -> shm_name
-    // - [2] -> sock_path
+    // - [1] -> sock_path
+    // - [2] -> staging_cap
     var it = init.minimal.args.iterate();
     _ = it.skip();
-
-    const shm_name = it.next() orelse {
-        std.debug.print("RENDERER: no shm_name in argv", .{});
-        return error.MissingShmName;
-    };
 
     const sock_path = it.next() orelse {
         std.debug.print("RENDERER: no sock_path in argv\n", .{});
         return error.MissingSockPath;
-    };
-
-    const staging_name = it.next() orelse {
-        std.debug.print("RENDERER: no staging_name in argv\n", .{});
-        return error.MissingStagingName;
     };
 
     const staging_cap = blk: {
@@ -208,15 +199,16 @@ pub fn main(init: std.process.Init) !void {
         break :blk try std.fmt.parseInt(u32, s, 10);
     };
 
-    // Open the EXISTING region - no CREATE, the host already made it.
-    // Open-by-name is known-temporary: Host pass the fd via SCM_RIGHTS
-    const oflags: std.c.O = .{ .ACCMODE = .RDWR };
-    const fd = std.c.shm_open(shm_name.ptr, @bitCast(oflags), @as(c_uint, 0));
+    // Connect the control channel first - for shared memory
+    const uaddr = try net.UnixAddress.init(sock_path);
+    const control = try uaddr.connect(init.io);
+    defer control.close(init.io);
+    std.debug.print("RENDERER: control channel connected\n", .{});
 
-    if (fd < 0) {
-        std.debug.print("RENDERER: shm_open({s}) failed: {s}\n", .{ shm_name, @tagName(std.posix.errno(fd)) });
-        return error.ShmOpenFailed;
-    }
+    // The host sends the regions as the first two SCM_RIGHTS messages
+    const fd = try fdpass.recvFd(control.socket.handle);
+    // the mapping below outlives the descriptor
+    defer _ = std.c.close(fd);
 
     // Map it - same size and flags the host used.
     const mapping = try std.posix.mmap(null, frame.region_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
@@ -229,16 +221,10 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    std.debug.print("RENDERER: shared region OK via {s}\n", .{shm_name});
+    std.debug.print("RENDERER: shared region OK (fd via SCM_RIGHTS)\n", .{});
 
     // --- Map the staging region (the atlas stream) shared by the host ---
-    const staging_oflags: std.c.O = .{ .ACCMODE = .RDWR };
-    const staging_fd = std.c.shm_open(staging_name.ptr, @bitCast(staging_oflags), @as(c_uint, 0));
-
-    if (staging_fd < 0) {
-        std.debug.print("RENDERER: staging shm_open({s}) failed: {s}\n", .{ staging_name, @tagName(std.posix.errno(staging_fd)) });
-        return error.ShmOpenFailed;
-    }
+    const staging_fd = try fdpass.recvFd(control.socket.handle);
 
     const staging_map = try std.posix.mmap(null, staging.regionSize(staging_cap), .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, staging_fd, 0);
     defer std.posix.munmap(staging_map);
@@ -250,7 +236,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    std.debug.print("RENDERER: staging region OK via {s} cap={d}\n", .{ staging_name, staging_cap });
+    std.debug.print("RENDERER: staging region OK cap={d}\n", .{staging_cap});
 
     // --- Rasterize, pack and stream one glyph through the atlas stream ---
     const atlas_region = staging.Staging.init(staging_region, staging_cap);
@@ -319,10 +305,6 @@ pub fn main(init: std.process.Init) !void {
         .scene = scene_ptr,
         .measurer = paint.measurer(&sh),
     };
-
-    const uaddr = try net.UnixAddress.init(sock_path);
-    const control = try uaddr.connect(init.io);
-    defer control.close(init.io);
 
     std.debug.print("RENDERER: control channel connected\n", .{});
 

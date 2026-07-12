@@ -1,4 +1,5 @@
 const draw = @import("draw");
+const fdpass = @import("fdpass");
 const frame = @import("frame");
 const glfw = @import("glfw");
 const protocol = @import("protocol");
@@ -195,8 +196,9 @@ pub fn main(init: std.process.Init) !void {
         return error.ShmOpenFailed;
     }
 
-    // Teardown on any exit from here - including error returns below.
-    defer _ = std.c.shm_unlink(shm_name.ptr);
+    // Name dies here - the fd is the only capability, the renderer receives it
+    // over the control channel, nothing ever opens this region by name
+    _ = std.c.shm_unlink(shm_name.ptr);
 
     const trunc = std.c.ftruncate(fd, frame.region_size);
     if (trunc != 0) {
@@ -230,8 +232,9 @@ pub fn main(init: std.process.Init) !void {
         return error.ShmOpenFailed;
     }
 
-    // Teardown on exit (matches the frame region's defensice unlink)
-    defer _ = std.c.shm_unlink(staging_name.ptr);
+    // Name dies here - the fd is the only capability, the renderer receives it
+    // over the control channel, nothing ever opens this region by name
+    _ = std.c.shm_unlink(staging_name.ptr);
 
     if (std.c.ftruncate(staging_fd, @intCast(staging.regionSize(staging_cap))) != 0) {
         std.debug.print("HOST: staging ftruncate failed\n", .{});
@@ -260,7 +263,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // --- Spawn renderer engine (shm_name + socket pth) ---
-    spawnRenderer(init.io, init.gpa, shm_name, sock_path, staging_name, staging_cap) catch |err| {
+    spawnRenderer(init.io, init.gpa, sock_path, staging_cap) catch |err| {
         std.debug.print("Failed to spawn renderer: {s}\n", .{@errorName(err)});
         return err;
     };
@@ -268,6 +271,11 @@ pub fn main(init: std.process.Init) !void {
     // Block until the renderer connects back on the control channel.
     const control = try server.accept(init.io);
     defer control.close(init.io);
+
+    // The renderer opens noting by name. Its shared memory arrives as the first
+    // two SCM_RIGHTS messages on this channel: frame region, then staging
+    try fdpass.sendFd(control.socket.handle, fd);
+    try fdpass.sendFd(control.socket.handle, staging_fd);
 
     var click_ctx = ClickCtx{ .gpu = &gpu, .control = control, .io = init.io };
 
@@ -375,7 +383,7 @@ pub fn main(init: std.process.Init) !void {
     ipc.join();
 }
 
-fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, sock_path: []const u8, staging_name: [:0]const u8, staging_cap: u32) !void {
+fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, sock_path: []const u8, staging_cap: u32) !void {
     const self_dir = try std.process.executableDirPathAlloc(io, gpa);
     defer gpa.free(self_dir);
 
@@ -385,6 +393,6 @@ fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, shm_name: [:0]const u8, soc
     var cap_buf: [16]u8 = undefined;
     const cap_str = try std.fmt.bufPrint(&cap_buf, "{d}", .{staging_cap});
 
-    const argv = [_][]const u8{ renderer_path, shm_name, sock_path, staging_name, cap_str };
+    const argv = [_][]const u8{ renderer_path, sock_path, cap_str };
     _ = try std.process.spawn(io, .{ .argv = &argv });
 }
