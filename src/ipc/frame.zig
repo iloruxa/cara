@@ -442,3 +442,40 @@ test "fuzz: take clamps a corrupt latest slot index (5.17)" {
     }
     std.mem.doNotOptimizeAway(sink);
 }
+
+test "stress: consumer holds against a concurrently mutating producer (5.17)" {
+    const f = Frames.init(&test_region_buf);
+    var stop: bool = false;
+
+    const Hostile = struct {
+        fn run(frames: Frames, flag: *bool) void {
+            var prng = std.Random.DefaultPrng.init(0x5721_A11A);
+            const rng = prng.random();
+            while (@atomicLoad(bool, flag, .acquire) == false) {
+                // scribble the slots (producer mutating the slot mid-read)...
+                var s: usize = 0;
+                while (s < slot_count) : (s += 1) rng.bytes(frames.slotBytes(@intCast(s)));
+                // ...and publish a random `latest` atomically, as the real producer does
+                @atomicStore(u32, &frames.header.latest, rng.int(u32), .release);
+            }
+        }
+    };
+
+    const t = try std.Thread.spawn(.{}, Hostile.run, .{ f, &stop });
+    defer {
+        @atomicStore(bool, &stop, true, .release);
+        t.join();
+    }
+
+    var c = f.consumer();
+    var sink: u64 = 0;
+    var i: usize = 0;
+    while (i < 10_000) : (i += 1) {
+        if (c.take()) |slot| {
+            const fr = parse(slot);
+            for (std.mem.sliceAsBytes(fr.damage)) |b| sink +%= b; // raw-ptr slice: read to catch OOB
+            for (fr.commands) |b| sink +%= b;
+        }
+    }
+    std.mem.doNotOptimizeAway(sink);
+}

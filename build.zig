@@ -61,6 +61,7 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/ipc/frame.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     host.root_module.addImport("frame", frame_module);
     renderer.root_module.addImport("frame", frame_module);
