@@ -390,7 +390,7 @@ pub fn main(init: std.process.Init) !void {
                                 std.debug.print("RENDERER: calling onClick '{s}'\n", .{handler});
 
                                 if (luau.cara_luau_pcall(script, 0, 0) != 0) {
-                                    std.debug.print("RENDERER: handler '{s}' error: {s}\n", .{ handler, luau.cara_luau_tostring(vm, -1) orelse "?" });
+                                    std.debug.print("RENDERER: handler '{s}' error: {s}\n", .{ handler, luau.cara_luau_tostring(script, -1) orelse "?" });
 
                                     // pop the error message
                                     luau.cara_luau_pop(script, 1);
@@ -405,7 +405,7 @@ pub fn main(init: std.process.Init) !void {
                                 luau.cara_luau_pop(script, 1);
                             }
                         } else {
-                            std.debug.print("RENDERER: click on {s} #{d}, no onClick handler in ancestry\n", .{ @tagName(scene_ptr.kind[hit.index]), hit.index });
+                            std.debug.print("RENDERER: onClick handler name too long ({d} bytes), skipped\n", .{handler.len});
                         }
                     } else {
                         std.debug.print("RENDERER: click on {s} #{d}, no onClick handler in ancestry\n", .{ @tagName(scene_ptr.kind[hit.index]), hit.index });
