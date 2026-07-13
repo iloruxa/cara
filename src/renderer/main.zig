@@ -90,7 +90,6 @@ export fn cara_host_signal_get(name_ptr: [*]const u8, len: usize) i64 {
 }
 
 export fn cara_host_signal_set(name_ptr: [*]const u8, len: usize, value: i64) void {
-    std.debug.print("RENDERER: set '{s}' = {d}\n", .{ name_ptr[0..len], value });
     g_signals.set(name_ptr[0..len], value);
 }
 
@@ -133,8 +132,6 @@ fn produceFrame(
 
     try cw.interface.writeAll(std.mem.asBytes(&env));
     try cw.interface.flush();
-
-    std.debug.print("RENDERER: published frame seq={d} ({d} cmd bytes)\n", .{ seq, painter.enc.bytes().len });
 }
 
 fn resolveBindings(scene: *scene_mod.Scene) void {
@@ -144,7 +141,6 @@ fn resolveBindings(scene: *scene_mod.Scene) void {
         if (scene.bind[i].len == 0) continue;
 
         const val = g_signals.get(scene.bind[i]);
-        std.debug.print("RENDERER: resolve '{s}' = {d}\n", .{ scene.bind[i], val });
         const s = std.fmt.bufPrint(&scene.num_buf[i], "{d}", .{val}) catch continue;
         const span = scene.first_child[i];
 
@@ -301,8 +297,6 @@ pub fn main(init: std.process.Init) !void {
         .scene = scene_ptr,
         .measurer = paint.measurer(&sh),
     };
-
-    std.debug.print("RENDERER: control channel connected\n", .{});
 
     // --- Producer ---
     // Build one frame's display list, write a slot, publish
