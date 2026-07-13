@@ -399,3 +399,46 @@ test "oversized header counts are clamped to the slot" {
     try testing.expect(fr.damage.len * @sizeOf(DamageRect) <= buf.len);
     for (fr.commands) |_| {} // touch every byte; must not run past the slot
 }
+
+test "fuzz: parse survives arbitrary slot bytes, never reads OOB (5.17)" {
+    var prng = std.Random.DefaultPrng.init(0xCA5A_1158);
+    const rng = prng.random();
+
+    // A small slot keeps each iteration cheap while exercising every bound: the
+    // @min clamps are size-independent. Aligned like a real slot so parse's
+    // header/damage @alignCasts are sound.
+    var slot: [4096]u8 align(cache_line) = undefined;
+
+    var sink: u64 = 0;
+    var i: usize = 0;
+    while (i < 100_000) : (i += 1) {
+        rng.bytes(&slot); // hostile producer: any bytes, any header counts
+
+        const fr = parse(&slot);
+        // damage is sliced from a raw pointer (unchecked at creation), so read it
+        // to prove dmg_count was clamped; commands is a checked sub-slice, so
+        // parse() forming it already proved cmd_len.
+        for (std.mem.sliceAsBytes(fr.damage)) |b| sink +%= b;
+        for (fr.commands) |b| sink +%= b;
+    }
+    std.mem.doNotOptimizeAway(sink);
+}
+
+test "fuzz: take clamps a corrupt latest slot index (5.17)" {
+    var prng = std.Random.DefaultPrng.init(0x7A4E_1158);
+    const rng = prng.random();
+
+    writeInitialHeader(&test_region_buf);
+    const f = Frames.init(&test_region_buf);
+    var c = f.consumer();
+
+    var sink: u64 = 0;
+    var i: usize = 0;
+    while (i < 500_000) : (i += 1) {
+        // any latest word: the packed slot index (u2) may be 3, out of the 3-slot
+        // range; take() must @min it back in or slotBytes would slice past the region
+        @atomicStore(u32, &f.header.latest, rng.int(u32), .release);
+        if (c.take()) |s| sink +%= s.len;
+    }
+    std.mem.doNotOptimizeAway(sink);
+}

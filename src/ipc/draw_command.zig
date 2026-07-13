@@ -326,3 +326,49 @@ test "parseTextRun rejects a truncated payload" {
     const cmd = it.next() orelse return error.NoCommand;
     try testing.expect(parseTextRun(cmd.payload[0 .. cmd.payload.len - 8]) == null); // claims 1 glyph, body short
 }
+
+test "fuzz: iterator and parseTextRun survive arbitrary command bytes (5.17)" {
+    var prng = std.Random.DefaultPrng.init(0xD4A0_1158);
+    const rng = prng.random();
+
+    // 8-aligned like a slot's command area (command_header_size == 8) so payloads
+    // land aligned and parseTextRun's @alignCasts are sound: this tests the bounds
+    // logic, not a spurious alignment panic.
+    var buf: [4096]u8 align(8) = undefined;
+
+    var sink: u64 = 0;
+    var i: usize = 0;
+    while (i < 100_000) : (i += 1) {
+        rng.bytes(&buf);
+
+        var it = Iterator{ .buf = &buf };
+        while (it.next()) |cmd| {
+            sink +%= cmd.payload.len; // payload is a checked sub-slice
+            // glyphs come from a raw pointer (unchecked), so read them to prove
+            // glyph_count was bounded against the payload.
+            if (parseTextRun(cmd.payload)) |run| {
+                for (std.mem.sliceAsBytes(run.glyphs)) |b| sink +%= b;
+            }
+        }
+    }
+    std.mem.doNotOptimizeAway(sink);
+}
+
+test "parseTextRun bounds glyph_count at the payload edge (5.17)" {
+    const H = @sizeOf(TextRunHeader);
+    const G = @sizeOf(PackedGlyph);
+    var buf: [H + 4 * G]u8 align(8) = undefined;
+    @memset(&buf, 0);
+    const hdr: *TextRunHeader = @ptrCast(@alignCast(&buf));
+
+    hdr.glyph_count = 4; // exactly fills the trailing space
+    try testing.expect(parseTextRun(&buf).?.glyphs.len == 4);
+
+    hdr.glyph_count = 5; // one past the edge -> rejected, no OOB slice
+    try testing.expect(parseTextRun(&buf) == null);
+
+    hdr.glyph_count = 0xFFFF_FFFF; // absurd (no u32*size overflow on 64-bit usize)
+    try testing.expect(parseTextRun(&buf) == null);
+
+    try testing.expect(parseTextRun(buf[0 .. H - 1]) == null); // truncated header
+}
