@@ -262,6 +262,15 @@ pub fn main(init: std.process.Init) !void {
         std.Io.Dir.deleteFileAbsolute(init.io, sock_path) catch {};
     }
 
+    // --- Seal capability fds against the fork ---
+    // The renderer connects by socket path and receives shm via SCM_RIGHTS, it
+    // must inherit none of these across exec. Post-Seatbelt a leaked fd is a
+    // live capability the sandbox cannot revoke, so refuse to spawn if sealing
+    // fails
+    try setCloexec(fd);
+    try setCloexec(staging_fd);
+    try setCloexec(server.socket.handle);
+
     // --- Spawn renderer engine (shm_name + socket pth) ---
     spawnRenderer(init.io, init.gpa, sock_path, staging_cap) catch |err| {
         std.debug.print("Failed to spawn renderer: {s}\n", .{@errorName(err)});
@@ -381,6 +390,10 @@ pub fn main(init: std.process.Init) !void {
     // Window closing: unblock the IPC thread's blocking read, then join it.
     control.shutdown(init.io, .both) catch {};
     ipc.join();
+}
+
+fn setCloexec(fd: std.posix.fd_t) !void {
+    if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.CloexecFailed;
 }
 
 fn spawnRenderer(io: std.Io, gpa: std.mem.Allocator, sock_path: []const u8, staging_cap: u32) !void {
