@@ -299,13 +299,23 @@ pub fn main(init: std.process.Init) !void {
     // exposes get()/set() to the page script
     luau.cara_luau_register_signals(vm);
 
-    if (luau.cara_luau_loadstring(vm, "page", page_script, page_script.len) != 0) {
-        std.debug.print("RENDERER: page script load error: {s}\n", .{luau.cara_luau_tostring(vm, -1) orelse "?"});
+    // Freeze the shared state: get/set are registered. nothing else may join
+    luau.cara_luau_sandbox(vm);
+
+    // The page runs in its own sandboxed thread: it can define it handlers in
+    // private globals but cannot touch the frozen shared environment
+    const script = luau.cara_luau_newscript(vm) orelse {
+        std.debug.print("RENDERER: luau script thread failed\n", .{});
+        return error.LuauThread;
+    };
+
+    if (luau.cara_luau_loadstring(script, "page", page_script, page_script.len) != 0) {
+        std.debug.print("RENDERER: page script load error: {s}\n", .{luau.cara_luau_tostring(script, -1) orelse "?"});
         return error.LuauLoad;
     }
 
-    if (luau.cara_luau_pcall(vm, 0, 0) != 0) {
-        std.debug.print("RENDERER: page script run error: {s}\n", .{luau.cara_luau_tostring(vm, -1) orelse "?"});
+    if (luau.cara_luau_pcall(script, 0, 0) != 0) {
+        std.debug.print("RENDERER: page script run error: {s}\n", .{luau.cara_luau_tostring(script, -1) orelse "?"});
         return error.LuauRun;
     }
 
@@ -398,16 +408,16 @@ pub fn main(init: std.process.Init) !void {
 
                             const name_z: [*:0]const u8 = @ptrCast(&name_buf);
 
-                            _ = luau.cara_luau_getglobal(vm, name_z);
+                            _ = luau.cara_luau_getglobal(script, name_z);
 
-                            if (luau.cara_luau_isfunction(vm, -1) != 0) {
+                            if (luau.cara_luau_isfunction(script, -1) != 0) {
                                 std.debug.print("RENDERER: calling onClick '{s}'\n", .{handler});
 
-                                if (luau.cara_luau_pcall(vm, 0, 0) != 0) {
+                                if (luau.cara_luau_pcall(script, 0, 0) != 0) {
                                     std.debug.print("RENDERER: handler '{s}' error: {s}\n", .{ handler, luau.cara_luau_tostring(vm, -1) orelse "?" });
 
                                     // pop the error message
-                                    luau.cara_luau_pop(vm, 1);
+                                    luau.cara_luau_pop(script, 1);
                                 }
 
                                 // a handler ran, re-render
@@ -416,7 +426,7 @@ pub fn main(init: std.process.Init) !void {
                                 std.debug.print("RENDERER: onClick '{s}' is not a function\n", .{handler});
 
                                 // pop the non-function value
-                                luau.cara_luau_pop(vm, 1);
+                                luau.cara_luau_pop(script, 1);
                             }
                         } else {
                             std.debug.print("RENDERER: click on {s} #{d}, no onClick handler in ancestry\n", .{ @tagName(scene_ptr.kind[hit.index]), hit.index });
