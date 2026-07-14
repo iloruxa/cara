@@ -119,6 +119,22 @@ pub fn build(b: *std.Build) !void {
     const fdpass_tests = b.addTest(.{ .root_module = fdpass_module });
     test_step.dependOn(&b.addRunArtifact(fdpass_tests).step);
 
+    // --- GPU: Metal backend ---
+    if (target.result.os.tag.isDarwin()) {
+        const metal_module = b.createModule(.{
+            .root_source_file = b.path("src/host/metal.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        metal_module.linkFramework("Metal", .{});
+        metal_module.linkFramework("Foundation", .{});
+        metal_module.linkFramework("QuartzCore", .{});
+
+        const metal_tests = b.addTest(.{ .root_module = metal_module });
+        test_step.dependOn(&b.addRunArtifact(metal_tests).step);
+    }
+
     // --- GPU: wgpu-native (WebGPU), prebuilt static lib + translate-c bindings ---
     const wgpu_dep = b.dependency("wgpu", .{});
     const wgpu_module = b.createModule(.{

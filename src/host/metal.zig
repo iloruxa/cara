@@ -95,4 +95,64 @@ pub const Metal = struct {
         msg0v(self.queue, sel("release"));
         msg0v(self.device, sel("release"));
     }
+
+    // Clear a 1x1 offscreen BGRA texture to `color`, commit, and read the texel
+    // back
+    // * Returns bytes in memory order: B, G, R, A
+    pub fn clearReadBack(self: Metal, red: f64, green: f64, blue: f64, alpha: f64) Error![4]u8 {
+        const pool = objc_autoreleasePoolPush();
+        defer objc_autoreleasePoolPop(pool);
+
+        const desc = msgTexDesc(objc_getClass("MTLTextureDescriptor"), sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), MTLPixelFormatBGRA8Unorm, 1, 1, false);
+        msgSetU(desc, sel("setUsage:"), MTLTextureUsageRenderTarget);
+        msgSetU(desc, sel("setStorageMode:"), MTLStorageModeShared);
+
+        const tex = msgId(self.device, sel("newTextureWithDescriptor:"), desc) orelse return error.NoTexture;
+        defer msg0v(tex, sel("release"));
+
+        const rpd = msg0(objc_getClass("MTLRenderPassDescriptor"), sel("renderPassDescriptor"));
+        const att0 = msgIdxId(msg0(rpd, sel("colorAttachments")), sel("objectAtIndexedSubscript:"), 0);
+
+        msgSetId(att0, sel("setTexture:"), tex);
+        msgSetU(att0, sel("setLoadAction:"), MTLLoadActionClear);
+        msgSetU(att0, sel("setStoreAction:"), MTLStoreActionStore);
+        msgSetClearColor(att0, sel("setClearColor:"), .{ .red = red, .green = green, .blue = blue, .alpha = alpha });
+
+        const cb = msg0(self.queue, sel("commandBuffer"));
+        const enc = msgId(cb, sel("renderCommandEncoderWithDescriptor:"), rpd);
+        msg0v(enc, sel("endEncoding"));
+        msg0v(cb, sel("commit"));
+        msg0v(cb, sel("waitUntilCompleted"));
+
+        var px: [4]u8 = undefined;
+        const region = MTLRegion{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = 1, .height = 1, .depth = 1 } };
+
+        msgGetBytes(tex, sel("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), &px, 4, region, 0);
+
+        return px;
+    }
 };
+
+// --- Testing ---
+const testing = std.testing;
+
+test "metal clears an offscreen texture to a known color and reads it back" {
+    // headless / no GPU: skip
+    var m = Metal.init() catch return error.SkipZigTest;
+    defer m.deinit();
+
+    // Opaque blue in, BGRA out: B=255, G=0, R=0, A=255
+    const px = try m.clearReadBack(0.0, 0.0, 1.0, 1.0);
+
+    // B
+    try testing.expectEqual(@as(u8, 255), px[0]);
+
+    // G
+    try testing.expectEqual(@as(u8, 0), px[1]);
+
+    // R
+    try testing.expectEqual(@as(u8, 0), px[2]);
+
+    // A
+    try testing.expectEqual(@as(u8, 255), px[3]);
+}
